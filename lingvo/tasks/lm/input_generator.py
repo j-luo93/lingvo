@@ -33,8 +33,35 @@ class LmInput(base_input_generator.BaseSequenceInputGenerator):
   def Params(cls):
     """Defaults params for LmInput."""
     p = super(LmInput, cls).Params()
+    p.Define('use_chunks', False, 'Flag to use chunks during training.')
     p.tokenizer = tokenizers.SimpleTokenizer.Params()
     return p
+
+  @staticmethod
+  def GetChunks(ids, labels, paddings):
+    # TODO(jmluo) this happens before trimming and transposing
+    py_utils.HasRank(ids, 2)
+    # separate BIO tags from true ids
+    tags = ids[:, 0::2] # Note that this also includes <S>
+    ids = tf.concat([ids[:, 0:1], ids[:, 1:-1:2]], axis=1)
+    # adjust labels accordingly
+    labels = labels[:, 0::2]
+    paddings = paddings[:, 0::2]
+
+    # compute chunk ids
+    is_B = tf.equal(tags, 4)
+    is_I = tf.equal(tags, 5)
+    is_O = tf.equal(tags, 6)
+    is_BI = tf.logical_or(is_B, is_I)
+    chunk_ids = tf.cumsum(tf.to_int32(is_B), axis=1) * tf.to_int32(is_BI) # shouldn't have overflow issues here
+    # is_BO = tf.logical_or(is_B, is_O)
+    # last_word_marks = tf.logical_and(is_BI, tf.logical_not(tf.concat([is_I[:, 1:], tf.zeros([tf.shape(ids)[0], 1], dtype=tf.bool)], axis=1)))
+    # # last_word_marks => chunk_ids
+    # # tf.assert_equal(tf.logical_or(tf.logical_not(last_word_marks), tf.greater(chunk_ids, 0)), tf.ones_like(chunk_ids, dtype=tf.bool))
+    # # have the same number of chunks
+    # last_word_marks = tf.to_int32(last_word_marks)
+    # tf.assert_equal(tf.reduce_max(chunk_ids, axis=1), tf.reduce_sum(last_word_marks, axis=1))
+    return ids, labels, paddings, chunk_ids #(chunk_ids, last_word_marks)
 
   def __init__(self, params):
     params.pad_to_max_seq_length = True
@@ -43,6 +70,8 @@ class LmInput(base_input_generator.BaseSequenceInputGenerator):
 
     text, self._word_count = self._BuildDataSource()
     self._ids, self._labels, self._paddings = self.StringsToIds(text)
+    if p.use_chunks:
+      self._ids, self._labels, self._paddings, self._chunk_ids = LmInput.GetChunks(self._ids, self._labels, self._paddings)
     self._input_batch_size = tf.shape(self._ids)[0]
     tf.summary.histogram('examples/sequence_length',
                          tf.reduce_sum(1.0 - self._paddings, axis=1))
@@ -85,4 +114,7 @@ class LmInput(base_input_generator.BaseSequenceInputGenerator):
     ret.paddings = self._paddings
     ret.weights = self._weights
     ret.word_count = self._word_count
+    if self.params.use_chunks:
+        ret.chunk_ids = self._chunk_ids
+        
     return ret

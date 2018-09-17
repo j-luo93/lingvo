@@ -134,6 +134,8 @@ class VocabFileTokenizer(BaseTokenizer):
              'If set, specifies a filepath to the Ngram vocab file.')
     p.Define('ngram_separator', '',
              'string separator to use when joining ngrams.')
+    p.Define('normalization', 'lowercase',
+             'text normalization')
     return p
 
   @property

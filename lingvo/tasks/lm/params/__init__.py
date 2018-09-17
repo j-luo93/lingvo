@@ -17,4 +17,6 @@
 # Import ModelParams to ensure that they are added to the global registry.
 # pylint: disable=unused-import
 import lingvo.tasks.lm.params.one_billion_wds
+import lingvo.tasks.lm.params.ptb_word_level
+# import lingvo.tasks.lm.params.one_billion_word_level
 # pylint: enable=unused-import

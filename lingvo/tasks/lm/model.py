@@ -45,6 +45,7 @@ class LanguageModel(base_model.BaseTask):
         'sum_loss_across_tokens_in_batch', False,
         'Sum the logP across predicted tokens in batch when set to True; '
         'average across predicted tokens in batch o/w (default).')
+    tp.Define('isometric', 0.0, 'Weight for isometric constraint')
 
     tp.lr_schedule = lr_schedule.PiecewiseConstantLearningRateSchedule.Params(
     ).Set(
@@ -70,28 +71,34 @@ class LanguageModel(base_model.BaseTask):
       # Construct the model.
       self.CreateChild('lm', p.lm)
 
-  def _TrimIfPossibleThenTranspose(self, ids, paddings, labels, weights):
+  def _TrimIfPossibleThenTranspose(self, ids, paddings, labels, weights, chunk_ids=None):
     data = (ids, paddings, labels, weights)
     if not py_utils.use_tpu():
       max_seq_len = tf.cast(
           tf.reduce_max(tf.reduce_sum(1.0 - paddings, 1)), tf.int32)
       data = (x[:, :max_seq_len] for x in data)
-    return (tf.transpose(x) for x in data)
+      if chunk_ids is not None:
+        chunk_ids = tf.transpose(chunk_ids[:, :max_seq_len])
+    return [tf.transpose(x) for x in data] + [chunk_ids] 
 
   def FPropTower(self, theta, input_batch):
     p = self.params
-    ids, paddings, labels_ids, weights = self._TrimIfPossibleThenTranspose(
+    chunk_ids = input_batch.chunk_ids if p.lm.use_chunks else None
+    ids, paddings, labels_ids, weights, chunk_ids = self._TrimIfPossibleThenTranspose(
         input_batch.ids, input_batch.paddings, input_batch.labels,
-        input_batch.weights)
+        input_batch.weights, chunk_ids=chunk_ids)
 
+    seqlen = tf.shape(ids)[0]
     batch_size = tf.shape(ids)[1]
     state0 = self.lm.zero_state(batch_size)
     labels = py_utils.NestedMap(class_ids=labels_ids, class_weights=weights)
-    xent_output, _ = self.lm.FProp(theta.lm, ids, paddings, state0, labels)
+    
+    xent_output, _ = self.lm.FProp(theta.lm, ids, paddings, state0, labels=labels, chunk_ids=chunk_ids)
 
     # +1 to account for the end of sequence symbol.
+    div = 2 if p.input.use_chunks else 1 # tags shouldn't be counted as words
     num_words = tf.cast(
-        tf.reduce_sum(input_batch.word_count + tf.constant(1, dtype=tf.int32)),
+        tf.reduce_sum(input_batch.word_count // div + tf.constant(1, dtype=tf.int32)),
         tf.float32)
     predicted_labels = tf.cast(xent_output.per_example_argmax, labels_ids.dtype)
 
@@ -100,18 +107,98 @@ class LanguageModel(base_model.BaseTask):
         tf.cast(tf.equal(labels_ids, predicted_labels), tf.float32) *
         weights) / (
             num_preds + 1e-4)
+    if p.lm.emb.cls == layers.HRREmbeddingLayer:
+      signature = xent_output.signature
+      if p.train.isometric > 0.0:
+        isometric_constraint = 0.0
+        nr = p.lm.emb.num_roles
+        # TODO(jmluo) rearrange it to divide the code according to three modes
+        if 'F' in theta.lm.emb:
+          F_wm = theta.lm.emb.F
+          nr, nf, d = F_wm.get_shape().as_list()
+          # F2d leads to overspefication of parameters in F
+          F2d = tf.reshape(F_wm, [nr * nf, d])
+          diff = tf.matmul(F2d, tf.transpose(F2d)) - tf.eye(nr * nf)
+          # diff = tf.matmul(F_wm, tf.transpose(F_wm, perm=[0, 2, 1])) - tf.eye(nf)
+          isometric_constraint += tf.reduce_sum(diff**2) / 2.0
+        if 'A' in theta.lm:
+          d = theta.lm.A.get_shape().as_list()[0]
+          A = tf.reshape(theta.lm.A, [d, 2, d])
+          A1 = A[:, 0]
+          A2 = A[:, 1]
+          diff = tf.matmul(A1, tf.transpose(A2)) / 2
+          # isometric_constraint += tf.reduce_sum(diff ** 2)
+
+        if nr > 1 and 'r' in theta.lm.emb:
+          r_wm = theta.lm.emb.r
+          diff = tf.matmul(r_wm, tf.transpose(r_wm)) - tf.eye(nr)
+          isometric_constraint += tf.reduce_sum(diff**2)
+        if 'R' in theta.lm:
+          R_wm = theta.lm.R
+          diff = tf.matmul(R_wm, tf.transpose(R_wm)) - tf.eye(p.lm.num_sent_roles)
+          isometric_constraint += tf.reduce_sum(diff**2)
+        if p.lm.emb.mode == 'rs':
+          assert 'rR' in theta.lm.emb
+          rR = theta.lm.emb.rR
+          diff = tf.matmul(rR, tf.transpose(rR)) - tf.eye(2)
+          isometric_constraint += tf.reduce_sum(diff ** 2)
+
+          rs_all = theta.lm.emb.rs.wm
+          for rs in rs_all:
+            rs = tf.reshape(rs, [-1, 2, 2])
+            norm = tf.reduce_sum(rs ** 2, axis=-1)
+            isometric_constraint += tf.reduce_sum((norm - 1.0) ** 2) + tf.reduce_sum((rs ** 2) * ((1 - rs) ** 2))
+
+            normalized_rs = tf.nn.l2_normalize(rs, axis=-1)
+            dot = tf.matmul(normalized_rs, tf.transpose(normalized_rs, perm=[0, 2, 1]))
+            isometric_constraint += tf.reduce_sum(((dot * (tf.ones([2, 2]) - tf.eye(2))) ** 2) * 0.5)
+          tf.summary.histogram('rs', tf.stack(rs_all))
+        isometric_loss = isometric_constraint * p.train.isometric
+
+    if p.lm.use_chunks and not p.is_eval:
+      with tf.name_scope('global_decode'):
+        assert p.lm.num_sent_roles > 0
+        assert p.lm.global_decode
+        role_probs = xent_output.lower_roles
+        py_utils.HasRank(weights, 2)
+        emb = xent_output.emb * tf.expand_dims(weights, axis=-1)
+        roles = py_utils.Matmul(role_probs, theta.lm.R)
+        roles = tf.reshape(roles, [seqlen, batch_size, -1])
+        bound = layers.HRREmbeddingLayer.static_circular_conv(roles, emb) # size: sl x bs x d
+        total_chunk_loss = -tf.reduce_sum(xent_output.chunk_log_probs)
+        global_step = tf.to_float(py_utils.GetOrCreateGlobalStep())
+        temperature = tf.minimum(tf.constant(50000.0), global_step) / 50000.0
+        tf.summary.scalar('chunk/temperature', temperature)
+        total_chunk_loss *= temperature
+        chunk_loss = total_chunk_loss / xent_output.num_chunks
+        avg_chunk_loss = chunk_loss
 
     loss = xent_output.avg_xent
     if p.train.sum_loss_across_tokens_in_batch:
       loss = xent_output.total_xent
-    return {
-        'loss': (loss, num_preds),
+      if 'chunk_loss' in locals():
+        chunk_loss = total_chunk_loss
+
+    metrics = {
         'fraction_of_correct_next_step_preds': (mean_acc, num_preds),
         'log_pplx': (xent_output.avg_xent, num_preds),
         'log_pplx_per_word': (xent_output.total_xent / num_words, num_words),
         'num_predictions': (num_preds, 1),
         'num_words': (num_words, 1)
     }
+    tmp_loss = loss# + theta.dummy * theta.dummy
+    if 'isometric_loss' in locals():
+      tmp_loss += isometric_loss
+      metrics['isometric'] = (isometric_loss, 1)
+    if 'chunk_loss' in locals():
+      tmp_loss += chunk_loss
+      metrics['chunk_loss'] = (chunk_loss, split_count)
+      metrics['avg_chunk_loss'] = (avg_chunk_loss, xent_output.num_chunks)
+      metrics['num_chunks'] = (xent_output.num_chunks, 1)
+    metrics['loss'] = (tmp_loss, num_preds)
+
+    return metrics
+
 
   def AdjustGradients(self, var_grad):
     """Clip LSTM gradients.
@@ -140,3 +227,200 @@ class LanguageModel(base_model.BaseTask):
           list(zip(lstm_vars, clipped_lstm_grads)))
 
     return var_grad
+
+
+  def Inference(self):
+    """Constructs the inference subgraphs.
+
+    Returns:
+      {'subgraph_name': (fetches, feeds)}
+    """
+    subgraphs = {}
+    with tf.name_scope('inference'):
+      subgraphs['default'] = self._InferenceSubgraph_Default()
+      subgraphs['rnn_step'] = self._InferenceSubgraph_RNNStep()
+    return subgraphs
+
+  def _InferenceSubgraph_Default(self):
+    """Default inference subgraph.
+
+    Returns:
+      fetches: A dictionary of fetches, containing:
+        log_pplx_per_token: A matrix of shape [batch, time]. [i, j]
+          is i-th input text's j-th token's log prob.
+        paddings: A matrix of shape [batch, time]. The padding mask.
+        log_pplx_per_sample: A vector of shape [batch]. [i]
+          is i-th input text's log prob.
+        num_oovs_per_sample: A vector of shape [batch] counting the total number
+          of out-of-vocabulary tokens in each input.
+        tokens_from_labels: A vector of shape [batch] returning the predicted
+          tokens as a sequence after mapping them back to strings from ids using
+          the vocabulary.
+        ids: A matrix of shape [batch, time]. [i, j]
+          is i-th input text's j-th token's id.
+      feeds: A dictionary of feeds, containing:
+        text: A placeholder for a vector of strings.
+    """
+    p = self.params
+    text = tf.placeholder(tf.string, shape=[None])
+    # [batch, time]
+    ids, labels, paddings = self.input_generator.StringsToIds(text)
+    chunk_ids = None
+    if p.lm.gold_chunks:
+      ids, labels, paddings, chunk_ids = lm_inp.LmInput.GetChunks(ids, labels, paddings)
+    lengths = tf.reduce_sum(tf.to_int32(1 - paddings), axis=1)
+    tokens_from_labels = self.input_generator.IdsToStrings(labels, lengths)
+    oovs = tf.equal(labels, self.input_generator.tokenizer.unk_id)
+    num_oovs_per_sample = tf.to_int32(
+        tf.reduce_sum(tf.to_float(oovs) * (1 - paddings), axis=1))
+    # [time, batch]
+    ids, paddings, labels, weights, chunk_ids = self._TrimIfPossibleThenTranspose(
+        ids, paddings, labels, 1.0 - paddings, chunk_ids)
+    batch_size = tf.shape(ids)[1]
+    state0 = self.lm.zero_state(batch_size)
+    if p.lm.num_sent_roles > 0 and not p.lm.global_decode:
+      lower_state0 = self.lm.zero_state(batch_size)
+      xent_output, _, _ = self.lm.FPropDefaultTheta(
+          inputs=ids,
+          paddings=paddings,
+          state0=state0,
+          lower_state0=lower_state0,
+          labels=py_utils.NestedMap(class_ids=labels, class_weights=weights),
+          chunk_ids=chunk_ids,
+          ids=ids)
+    else:
+      xent_output, _ = self.lm.FPropDefaultTheta(
+          inputs=ids,
+          paddings=paddings,
+          state0=state0,
+          labels=py_utils.NestedMap(class_ids=labels, class_weights=weights),
+          chunk_ids=chunk_ids,
+          ids=ids)
+
+    per_example_xent = py_utils.HasShape(xent_output.per_example_xent,
+                                         tf.shape(ids))
+    log_pplx_per_sample = tf.reduce_sum(
+        per_example_xent * (1 - paddings), axis=0)
+    fetches = {
+        'log_pplx_per_token':  # [batch, time]
+            tf.transpose(per_example_xent),
+        'paddings':  # [batch, time]
+            tf.transpose(paddings),
+        'lengths':  # [batch]
+            lengths,
+        'log_pplx_per_sample':  # [batch]
+            log_pplx_per_sample,
+        'num_oovs_per_sample':  # [batch], int32
+            num_oovs_per_sample,
+        'tokens_from_labels':  # [batch], string
+            tokens_from_labels,
+        'ids':  # [batch, time], int32
+            ids
+    }
+    feeds = {'text': text}
+
+    # Also pass intermediate results
+    if 'inter_res' in xent_output:
+      inter_res = xent_output.inter_res
+      for key in inter_res:
+        new_key = 'inter_res.%s' %key
+        assert new_key not in fetches
+        fetches[new_key] = getattr(inter_res, key)
+    return fetches, feeds
+
+  def _InferenceSubgraph_RNNStep(self):
+    """Inference subgraph for one rnn step.
+
+    Returns:
+      fetches: A dictionary of fetches, containing:
+        zero_m_out_i: A matrix of shape [batch, output_size].
+          m values of the i-th layer of zero recurrent state.
+        zero_c_out_i: A matrix of shape [batch, hidden_size].
+          c values of the i-th layer of zero recurrent state.
+        logits: A matrix of shape [batch, num_candidates]. [i, j]
+          is i-th input's j-th candidate's logit.
+        m_out_i: A matrix of shape [batch, output_size].
+          m values of the i-th layer of new recurrent state after one step.
+        c_out_i: A matrix of shape [batch, hidden_size].
+          c values of the i-th layer of new recurrent state after one step.
+      feeds: A dictionary of feeds, containing:
+        step_ids: A matrix of shape [batch, 1]. [i, 0]
+          is the word id to run one step for the i-th input.
+        candidate_ids: A 3D tensor of shape [batch, num_candidates, 2].
+          [i, j, 0] = i just for indexing convenience.
+          [i, j, 1] is the word id of the i-th input's j-th candidate.
+        m_in_i: A matrix of shape [batch, output_size].
+          m values of input recurrent state.
+        c_in_i: A matrix of shape [batch, hidden_size].
+          c values of input recurrent state.
+    """
+    fetches, feeds = {}, {}
+
+    # Run one step with input ids and return logits.
+    # [batch, 1]
+    step_ids = tf.placeholder(tf.int32, [None, 1])
+    feeds['step_ids'] = step_ids
+
+    # Return logits only for certain candidate ids. This is to avoid returning
+    # a big list of logits for all words.
+    # This is a 3D tensor and it satisfies that:
+    #    candidate_ids[i, j, 0] = i (just for indexing convenience)
+    #    candidate_ids[i, j, 1] = the word id of the j-th candidate
+    # [batch, num_candidates, 2]
+    candidate_ids = tf.placeholder(tf.int32, [None, None, 2])
+    feeds['candidate_ids'] = candidate_ids
+
+    # Get initial zero states.
+    batch_size = tf.shape(step_ids)[0]
+    zero_state = self.lm.zero_state(batch_size)
+
+    # Input LM state.
+    state0 = zero_state.Transform(lambda x: tf.placeholder(tf.float32))
+
+    # Run LM for one step
+    step_ids_vec = tf.reshape(step_ids, [-1])
+    step_paddings = tf.zeros(tf.shape(step_ids_vec), dtype=self.params.dtype)
+
+    p = self.params
+    lower_state0 = None
+    if p.lm.num_sent_roles > 0 and not p.lm.global_decode:
+      lower_zero_state0 = self.lm.lower_rnns.zero_state(batch_size)
+      lower_state0 = lower_zero_state0.Transform(lambda x: tf.placeholder(tf.float32))
+    res = self.lm.Step(self.lm.theta, step_ids_vec, step_paddings,
+                               state0, lower_state0=lower_state0, step_inference=True) # TODO(jmluo) HACKY
+    if p.lm.num_sent_roles > 0 and not p.lm.global_decode:
+      out, state1, lower_state1 = res
+      # add more feeds and fetches for lower level rnn
+      feeds['lowerrnnstate:m'] = lower_state0.rnn[0].m
+      feeds['lowerrnnstate:c'] = lower_state0.rnn[0].c
+      fetches['lowerrnnstate:m'] = lower_state1.rnn[0].m
+      fetches['lowerrnnstate:c'] = lower_state1.rnn[0].c
+    else:
+      out, state1 = res
+
+    # Create feeds/fetches map for states.
+    for i, (zero_s, s0, s1) in enumerate(
+        zip(zero_state.rnn, state0.rnn, state1.rnn)):
+      feeds['rnnstate:m_%02d' % i] = s0.m
+      feeds['rnnstate:c_%02d' % i] = s0.c
+      fetches['rnnstate:zero_m_%02d' % i] = zero_s.m
+      fetches['rnnstate:zero_c_%02d' % i] = zero_s.c
+      fetches['rnnstate:m_%02d' % i] = s1.m
+      fetches['rnnstate:c_%02d' % i] = s1.c
+
+
+    # Collect logits for candidates
+    # [batch, num_candidates]
+    prob = tf.nn.softmax(out.logits)
+    candidate_prob = tf.gather_nd(prob, candidate_ids)
+    candidate_logits = tf.log(candidate_prob)
+    fetches['logits'] = candidate_logits
+
+
+    if 'gating_probs' in out:
+      fetches['gating_probs'] = out.gating_probs
+    if 'cce' in out:
+      fetches['cce'] = out.cce
+
+    # print('check here', fetches)
+    return fetches, feeds

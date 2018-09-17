@@ -52,6 +52,36 @@ _ACTIVATIONS_QUANT = {
 
 LOG_SCALE_CLAMP_BOUND = 20.0
 
+def sampled_softmax_logits(weights,
+                                    biases,
+                                    labels,
+                                    inputs,
+                                    num_sampled,
+                                    num_classes,
+                                    sampled_values,
+                                    num_true=1,
+                                    remove_accidental_hits=True,
+                                    partition_strategy='div',
+                                    name='sampled_softmax_logits',
+                                    subtract_log_q=True,
+                                    seed=None):
+  logits, labels = tf.nn.compute_sampled_logits(
+      weights=weights,
+      biases=biases,
+      labels=labels,
+      inputs=inputs,
+      num_sampled=num_sampled,
+      num_classes=num_classes,
+      num_true=num_true,
+      sampled_values=sampled_values,
+      subtract_log_q=subtract_log_q,
+      remove_accidental_hits=remove_accidental_hits,
+      partition_strategy=partition_strategy,
+      name=name,
+      seed=seed)
+  labels = tf.stop_gradient(labels, name="labels_stop_gradient")
+  return logits, labels
+
 
 def FPropDtype(params):
   return params.fprop_dtype if params.fprop_dtype is not None else params.dtype
@@ -769,6 +799,7 @@ class EmbeddingLayer(base_layer.LayerBase):
     p.Define('vocab_size', 0, 'Depth of the input.')
     p.Define('embedding_dim', 0, 'Depth of the output.')
     p.Define('max_num_shards', 0, 'Num param shards.')
+    p.Define('partition_strategy', 'mod', 'Partition strategy for sharded embeddings')
     p.Define('on_ps', True, 'True if to perform the embedding lookup on ps.')
     p.Define(
         'scale_sqrt_depth', False, 'If set True, activations are scaled'
@@ -1246,7 +1277,8 @@ class SoftmaxLayer(quant_utils.QuantizableLayer):
             inputs,
             class_weights,
             class_ids=None,
-            class_probabilities=None):
+            class_probabilities=None,
+            activation=None):
     """Computes logit, cross entropy etc.
 
     This function can both work with class_ids, or probability distributions
@@ -1286,7 +1318,7 @@ class SoftmaxLayer(quant_utils.QuantizableLayer):
     # If inputs are matrices already, delegate to _FProp2D.
     if inputs[0].shape.ndims == 2:
       return self._FProp2D(theta, inputs, class_weights, class_ids,
-                           class_probabilities)
+                           class_probabilities, activation=activation)
 
     # Remembers the original shape[1:-1].
     shape_mid = tf.shape(inputs[0])[1:-1]
@@ -1332,6 +1364,9 @@ class SimpleFullSoftmax(SoftmaxLayer):
         'num_shards', 1,
         'Number of shards to split params into. num_shards should'
         ' divide num_classes.')
+    p.Define('tie', False, 'Use tied embedding')
+    p.Define('num_roles', 0, 'Number of roles used for HRR')
+    p.Define('role_anneal', False, 'Use annealing for roles to break the symmetry')
     return p
 
   @base_layer.initializer
@@ -1340,6 +1375,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
     super(SimpleFullSoftmax, self).__init__(params)
     p = self.params
     assert p.name
+    
     # We shard params across the class dimension.
     assert p.num_classes % p.num_shards == 0
     num_classes_per_shard = p.num_classes // p.num_shards
@@ -1359,10 +1395,12 @@ class SimpleFullSoftmax(SoftmaxLayer):
           init=p.params_init,
           dtype=p.dtype,
           collections=[self.__class__.__name__ + '_vars'])
-      for i in range(p.num_shards):
-        self.CreateVariable('weight_%d' % i, pc, self.AddGlobalVN)
-
-      pc.shape = [num_classes_per_shard]
+      if not p.tie:
+        for i in range(p.num_shards):
+          self.CreateVariable('weight_%d' % i, pc, self.AddGlobalVN)
+      
+      multiplier = max(1, p.num_roles)
+      pc.shape = [num_classes_per_shard * multiplier]
       pc.init.method = 'constant'
       pc.init.scale = 0.0
       for i in range(p.num_shards):
@@ -1384,13 +1422,26 @@ class SimpleFullSoftmax(SoftmaxLayer):
         self.QWeight(theta['weight_%d' % i]) for i in range(p.num_shards)
     ]
     biases = [self.QWeight(theta['bias_%d' % i]) for i in range(p.num_shards)]
+    
     new_theta = theta.copy()
     new_theta.wm = py_utils.AddPerStepVN(p, tf.concat(
         weights, axis=concat_axis))
     new_theta.bias = py_utils.AddPerStepVN(p, tf.concat(biases, axis=0))
     return new_theta
 
-  def _LogitsUsingConcatenatedWeights(self, theta, inputs):
+  def _GetXWForRole(self, theta, inputs, role_ind):
+    p = self.params
+    preceding_shape = tf.shape(inputs)[:-1]
+    inp = tf.reshape(inputs, tf.concat([preceding_shape, [p.num_roles, -1]], axis=0))[..., role_ind, :]
+    last_dim = p.input_dim // p.num_roles
+    if self._transpose_weight_params:
+      w = tf.reshape(theta.wm, [-1, p.num_roles, last_dim])[:, role_ind]
+    else:
+      w = tf.reshape(theta.wm, [p.num_roles, last_dim, -1])[role_ind]
+    res = py_utils.Matmul(inp, w, transpose_b=self._transpose_weight_params)
+    return tf.reshape(res, tf.concat([preceding_shape, [-1]], axis=0))
+    
+  def _LogitsUsingConcatenatedWeights(self, theta, inputs, activation=None):
     p = self.params
     inputs = self.QTensor('inputs', inputs)
     wm = self.QWeight(theta.wm)
@@ -1399,9 +1450,17 @@ class SimpleFullSoftmax(SoftmaxLayer):
     # x * w + b
     # Note that theta.wm and theta.bias are transformed to concated/clipped
     # by caller.
-    logits = tf.nn.bias_add(
-        py_utils.Matmul(inputs, wm, transpose_b=self._transpose_weight_params),
-        bias)
+    if p.role_anneal > 0:
+      assert activation is not None
+      xws = list()
+      for role_ind in xrange(p.num_roles):
+        xws.append(self._GetXWForRole(theta, inputs, role_ind))
+      gating_probs = self._GetGatingProbs(theta, activation)
+      logits = tf.reduce_sum(tf.stack(xws, axis=-1) * tf.expand_dims(gating_probs, axis=-2), axis=-1)
+    else:
+      logits =  tf.nn.bias_add(
+        py_utils.Matmul(inputs, theta.wm, transpose_b=self._transpose_weight_params),
+        theta.bias)
 
     # Clip logits by range.
     # Note that this is generally not used in conjunction with quantization.
@@ -1411,6 +1470,22 @@ class SimpleFullSoftmax(SoftmaxLayer):
       logits = tf.clip_by_value(logits, abs_min, abs_max)
 
     return self.QTensor('logits', logits)
+
+  def _GetGatingProbs(self, theta, activation):
+    p = self.params
+    assert p.role_anneal > 0
+    
+    last_dim = tf.shape(activation)[-1]
+    inp = tf.reshape(activation, [-1, last_dim])
+    logits = py_utils.Matmul(inp, theta.gating)
+    
+    preceding_shape = tf.shape(inp)[:-1]
+    prob_1 = tf.ones(shape=preceding_shape)
+    global_step = tf.to_float(py_utils.GetOrCreateGlobalStep())
+    temperature = tf.minimum(tf.constant(p.role_anneal * 1.0), global_step) / (p.role_anneal * 1.0)
+    tf.summary.scalar('temperature', temperature)
+    probs = tf.stack([prob_1, prob_1 * temperature], axis=-1)
+    return probs
 
   def Logits(self, theta, inputs):
     """Returns the logits computed before the softmax.
@@ -1487,7 +1562,8 @@ class SimpleFullSoftmax(SoftmaxLayer):
                inputs,
                class_weights,
                class_ids=None,
-               class_probabilities=None):
+               class_probabilities=None,
+               activation=None):
     """Computes xent loss and log-prob logit."""
     p = self.params
     inputs = self._GetInputs(inputs)
@@ -1517,15 +1593,62 @@ class SimpleFullSoftmax(SoftmaxLayer):
           0, 'Using sampled_softmax_loss(..., num_sampled=%d, '
           'num_classes=%d) in SimpleFullSoftmax::_FProp2D', p.num_sampled,
           p.num_classes)
-      per_example_xent = tf.nn.sampled_softmax_loss(
-          weights=[theta['weight_%d' % i] for i in range(p.num_shards)],
-          biases=tf.concat(
-              [theta['bias_%d' % i] for i in range(p.num_shards)], axis=0),
-          labels=tf.reshape(class_ids, [-1, 1]),
-          inputs=self._GetInputs(inputs),
-          num_sampled=p.num_sampled,
-          num_classes=p.num_classes,
-          partition_strategy='div')
+      if p.num_roles == 0:
+        per_example_xent = tf.nn.sampled_softmax_loss(
+            weights=[theta['weight_%d' % i] for i in range(p.num_shards)],
+            biases=tf.concat(
+                [theta['bias_%d' % i] for i in range(p.num_shards)], axis=0),
+            labels=tf.reshape(class_ids, [-1, 1]),
+            inputs=self._GetInputs(inputs),
+            num_sampled=p.num_sampled,
+            num_classes=p.num_classes,
+            partition_strategy='div')
+      else:
+        num_classes_per_shard = theta.weight_0.get_shape().as_list()[0]
+        all_weights = [
+            tf.reshape(theta['weight_%d' % i], [num_classes_per_shard, p.num_roles, -1])
+            for i in range(p.num_shards)
+        ]
+        all_biases = [
+            tf.reshape(theta['bias_%d' % i], [num_classes_per_shard, p.num_roles])
+            for i in range(p.num_shards)
+        ]
+        all_inputs = self._GetInputs(inputs)
+        preceding_shape = tf.shape(all_inputs)[:-1]
+        all_inputs = tf.reshape(all_inputs, tf.concat([preceding_shape, [p.num_roles, -1]], axis=0))
+        reshaped_labels = tf.reshape(class_ids, [-1, 1])
+        if reshaped_labels.dtype != tf.int64:
+          reshaped_labels = tf.cast(reshaped_labels, tf.int64)
+        sampled_values = candidate_sampling_ops.log_uniform_candidate_sampler(
+            true_classes=reshaped_labels,
+            num_true=1,
+            num_sampled=p.num_sampled,
+            unique=True,
+            range_max=p.num_classes)
+        all_logits = list()
+        for role_ind in range(p.num_roles):
+          w_i = [w[:, role_ind] for w in all_weights]
+          b_i = [b[:, role_ind] for b in all_biases]
+          inp_i = all_inputs[..., role_ind, :]
+          subtract = role_ind == 0
+          r_logits, labels = sampled_softmax_logits(
+              weights=w_i,
+              biases=b_i,
+              labels=reshaped_labels,
+              sampled_values=sampled_values,
+              inputs=inp_i,
+              num_sampled=p.num_sampled,
+              num_classes=p.num_classes,
+              subtract_log_q=subtract,
+              partition_strategy='div')
+          all_logits.append(r_logits)
+
+        gating_probs = self._GetGatingProbs(theta, activation)
+        summed_logits = tf.reduce_sum(tf.stack(all_logits, axis=-1) * tf.expand_dims(gating_probs, axis=-2), axis=-1)
+          # summed_logits = tf.reduce_sum(tf.stack(all_logits, axis=-1), axis=-1) / 2
+        per_example_xent = nn_ops.softmax_cross_entropy_with_logits(
+          labels=labels, logits=summed_logits)
+
       # Avoid computing logits; per_example_argmax is going to be always right.
       per_example_argmax = tf.identity(class_ids)
 
