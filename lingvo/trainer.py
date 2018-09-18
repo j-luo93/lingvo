@@ -455,6 +455,9 @@ class Trainer(base_runner.BaseRunner):
                                      self._task_probs_summary_writers[index])
             except AttributeError:
               pass
+              
+        # from tensorflow.python import debug as tf_debug
+        # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
 
         _, global_step, eval_metrics = sess.run([
             model_task.train_op,
@@ -495,7 +498,7 @@ class Evaler(base_runner.BaseRunner):
         self._model.ConstructFPropGraph()
         self._model_task = self._model.GetTask(self._model_task_name)
         self._saver = self._GetSaver()
-        self._summary_op = tf.summary.merge_all()
+        self._summary_op = None#tf.summary.merge_all()
       self.initialize_tables = tf.tables_initializer()
       # No queues are allowed for eval models.
       self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)

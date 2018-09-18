@@ -40,7 +40,7 @@ class WordLevelPTBBase(base_model_params.SingleTaskModelParams):
     p = lm_inp.LmInput.Params()
     p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
     p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
-    p.bucket_batch_limit = [64] * len(p.bucket_upper_bound) # [1024, 512, 256, 256, 128, 128, 64, 32, 16]
+    #p.bucket_batch_limit = [64] * len(p.bucket_upper_bound) # [1024, 512, 256, 256, 128, 128, 64, 32, 16]
     p.file_buffer_size = 10000000
     p.file_parallelism = 10
     p.file_pattern = 'text:' + os.path.join(
@@ -69,7 +69,7 @@ class WordLevelPTBBase(base_model_params.SingleTaskModelParams):
         cls.CORPUS_DIR, 'dev.txt')
     p.name = 'ptb_dev_set'
     p.num_batcher_threads = 1
-    p.num_samples = 4900  # Number of sentences to evaluate on.
+    p.num_samples = 3370  # Number of sentences to evaluate on.
     return p
 
   @classmethod
@@ -84,7 +84,7 @@ class WordLevelPTBBase(base_model_params.SingleTaskModelParams):
         cls.CORPUS_DIR, 'test.txt')
     p.name = 'ptb_test_set'
     p.num_batcher_threads = 1
-    p.num_samples = 4840  # Number of sentences to evaluate on.
+    p.num_samples = 3761  # Number of sentences to evaluate on.
     return p
 
   @classmethod
@@ -130,7 +130,7 @@ class WordLevelPTBBase(base_model_params.SingleTaskModelParams):
             boundaries=[], values=[1.0]))
     tp.l2_regularizer_weight = None  # No regularization.
     tp.optimizer = optimizer.Adagrad.Params()
-    tp.save_interval_seconds = 100
+    tp.save_interval_seconds = 20
     tp.summary_interval_steps = 20
     return p
 
@@ -230,12 +230,11 @@ class WordLevelPTBSimpleSoftmaxHRR(WordLevelPTBSimpleSoftmaxAdam23):
     hrr.num_roles = cls.NUM_ROLES
     hrr.num_fillers_per_role = cls.NUM_FILLERS_PER_ROLE
     hrr.s.embedding_dim = cls.NUM_FILLERS_PER_ROLE * cls.NUM_ROLES
-    hrr.actual_shards = hrr.e_l.actual_shards
     p.lm.emb = hrr
+    p.lm.num_word_roles = cls.NUM_ROLES
     p.lm.softmax.input_dim *= cls.NUM_ROLES # size: |V| x nr*d
     # TODO(jmluo)
     # add dropout for r and F
-    p.lm.decode_dropout_keep_prob = 0.5
     p.lm.softmax.num_roles = cls.NUM_ROLES
     return p
 
@@ -291,11 +290,25 @@ class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2(WordLevelPTBSimpleSoftmaxHRRIsoR2T
 class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50GRA(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2):
   """Use sampled soft-max in training."""
 
+  NUM_FILLERS_PER_ROLE = 50
+
   @classmethod
   def Task(cls):
     p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50GRA, cls).Task()
     p.lm.softmax.role_anneal = 3000
     return p
+
+@model_registry.RegisterSingleTaskModel
+class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF100GRA(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50GRA): 
+
+  NUM_FILLERS_PER_ROLE = 100
+
+@model_registry.RegisterSingleTaskModel
+class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF250GRA(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50GRA): 
+
+  NUM_FILLERS_PER_ROLE = 250
+
+
 
 '''
 word-level HRR on chunk data
@@ -377,6 +390,7 @@ class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR2CGRA(WordLevelPTBSimpleSoftm
     # TODO(jmluo) need to rename this -- I'm still using chunk loss but there is no r_o prediction.
     p.lm.use_chunks = True
     p.lm.num_sent_roles = 2
+    p.lm.num_word_roles = 2
     for tpl in p.lm.rnns.cell_tpl:
       tpl.num_output_nodes = 2 * cls.EMBEDDING_DIM
     return p

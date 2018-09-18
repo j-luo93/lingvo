@@ -456,29 +456,30 @@ class RnnLmNoEmbedding(BaseLanguageModel):
 
       preceding_shape = tf.shape(activation)[:-1]
       f_noisy = self.emb.decode(tf.expand_dims(activation, axis=-2), emb_weights.r) # This is actually a bit hacky -- you don't know you have emb attribute
+      if not p.is_eval:
+        f_noisy = tf.nn.dropout(f_noisy, 0.5)
+
       cat = tf.reshape(f_noisy, tf.concat([preceding_shape, [p.softmax.input_dim]], axis=0))
       out = forward('softmax', cat, h=activation)
-
-      last_dim = tf.shape(sent_act)[-1]
-      w = tf.reshape(tf.matmul(tf.reshape(inputs, [-1, last_dim]), theta.A), [-1, 2, last_dim])
-      rw = HRREmbeddingLayer.static_circular_conv(theta.R, w)
-
-      inter_res.w = w
-      inter_res.rw = rw
-
-      clean_w = tf.expand_dims(lower_sent_role_probs, axis=-1) * w # size: sl*bs x 2 x d
-      clean_w = tf.transpose(tf.reshape(clean_w, [seqlen, batch, 2, last_dim]), perm=[1, 2, 0, 3]) # size: bs x 2 x sl x d
-      out.cce = clean_w
-      inter_res.w_clean = clean_w
 
       if p.num_sent_roles > 0:
         out.lower_roles = lower_sent_role_probs
         out.emb = inputs
         if p.gold_chunks and not step_inference: # skip chunk loss in step inference mode
           with tf.name_scope('chunk_prediction'):
-            # chunk_ids, last_word_marks = chunk_ids
+            last_dim = tf.shape(sent_act)[-1]
+            w = tf.reshape(tf.matmul(tf.reshape(inputs, [-1, last_dim]), theta.A), [-1, 2, last_dim])
+            rw = HRREmbeddingLayer.static_circular_conv(theta.R, w)
 
             inter_res.chunk_ids = chunk_ids
+            inter_res.w = w
+            inter_res.rw = rw
+
+            clean_w = tf.expand_dims(lower_sent_role_probs, axis=-1) * w # size: sl*bs x 2 x d
+            clean_w = tf.transpose(tf.reshape(clean_w, [seqlen, batch, 2, last_dim]), perm=[1, 2, 0, 3]) # size: bs x 2 x sl x d
+            out.cce = clean_w
+            inter_res.w_clean = clean_w
+
 
             bs_indices = tf.tile(tf.expand_dims(tf.range(batch), axis=0), [seqlen, 1])
             sl_indices = tf.tile(tf.expand_dims(tf.range(seqlen), axis=1), [1, batch])
@@ -733,7 +734,10 @@ class RnnLm(RnnLmNoEmbedding):
       emb_weights = None
 
     if p.tie:
-      num_shards = len(theta.emb.wm)
+      try:
+        num_shards = len(theta.emb.wm)
+      except:
+        num_shards = len(emb_weights.f)
 
       def transpose_or_not(w):
         transpose = (p.softmax.num_sampled == 0)
@@ -1281,7 +1285,6 @@ class HRREmbeddingLayer(base_layer.LayerBase):
     assert p.e_l.vocab_size == p.vocab_size == p.s.vocab_size
     assert p.e_l.embedding_dim == p.embedding_dim
     assert p.s.embedding_dim == p.num_fillers_per_role * p.num_roles
-    assert p.actual_shards == p.e_l.actual_shards == p.s.actual_shards
     assert p.mode in ['basic', 'rs', 'dec_only']
     if p.merge:
       assert p.mode == 'rs', 'Other modes not supported yet'

@@ -25,8 +25,16 @@ from six.moves import range
 import tensorflow as tf
 
 from tensorflow.python.framework import function
-from tensorflow.python.ops import functional_ops
-from tensorflow.python.ops import inplace_ops
+from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import ops
+from tensorflow.python.ops import candidate_sampling_ops
+from tensorflow.python.ops import embedding_ops
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import nn_ops
+from tensorflow.python.ops import sparse_ops
+from tensorflow.python.ops import clip_ops
+from tensorflow.python.ops import variables
 from lingvo.core import base_layer
 from lingvo.core import py_utils
 from lingvo.core import quant_utils
@@ -52,6 +60,150 @@ _ACTIVATIONS_QUANT = {
 
 LOG_SCALE_CLAMP_BOUND = 20.0
 
+def _sum_rows(x):
+  cols = array_ops.shape(x)[1]
+  ones_shape = array_ops.stack([cols, 1])
+  ones = array_ops.ones(ones_shape, x.dtype)
+  return array_ops.reshape(math_ops.matmul(x, ones), [-1])
+
+def _compute_sampled_logits(weights,
+                            biases,
+                            labels,
+                            inputs,
+                            num_sampled,
+                            num_classes,
+                            num_true=1,
+                            sampled_values=None,
+                            subtract_log_q=True,
+                            remove_accidental_hits=False,
+                            partition_strategy="mod",
+                            name=None,
+                            seed=None):
+
+
+  if isinstance(weights, variables.PartitionedVariable):
+    weights = list(weights)
+  if not isinstance(weights, list):
+    weights = [weights]
+
+  with ops.name_scope(name, "compute_sampled_logits",
+                      weights + [biases, inputs, labels]):
+    if labels.dtype != dtypes.int64:
+      labels = math_ops.cast(labels, dtypes.int64)
+    labels_flat = array_ops.reshape(labels, [-1])
+
+    # Sample the negative labels.
+    #   sampled shape: [num_sampled] tensor
+    #   true_expected_count shape = [batch_size, 1] tensor
+    #   sampled_expected_count shape = [num_sampled] tensor
+    if sampled_values is None:
+      sampled_values = candidate_sampling_ops.log_uniform_candidate_sampler(
+          true_classes=labels,
+          num_true=num_true,
+          num_sampled=num_sampled,
+          unique=True,
+          range_max=num_classes,
+          seed=seed)
+    # NOTE: pylint cannot tell that 'sampled_values' is a sequence
+    # pylint: disable=unpacking-non-sequence
+    sampled, true_expected_count, sampled_expected_count = (
+        array_ops.stop_gradient(s) for s in sampled_values)
+    # pylint: enable=unpacking-non-sequence
+    sampled = math_ops.cast(sampled, dtypes.int64)
+
+    # labels_flat is a [batch_size * num_true] tensor
+    # sampled is a [num_sampled] int tensor
+    all_ids = array_ops.concat([labels_flat, sampled], 0)
+
+    # Retrieve the true weights and the logits of the sampled weights.
+
+    # weights shape is [num_classes, dim]
+    all_w = embedding_ops.embedding_lookup(
+        weights, all_ids, partition_strategy=partition_strategy)
+
+    # true_w shape is [batch_size * num_true, dim]
+    true_w = array_ops.slice(all_w, [0, 0],
+                             array_ops.stack(
+                                 [array_ops.shape(labels_flat)[0], -1]))
+
+    sampled_w = array_ops.slice(
+        all_w, array_ops.stack([array_ops.shape(labels_flat)[0], 0]), [-1, -1])
+    # inputs has shape [batch_size, dim]
+    # sampled_w has shape [num_sampled, dim]
+    # Apply X*W', which yields [batch_size, num_sampled]
+    sampled_logits = math_ops.matmul(inputs, sampled_w, transpose_b=True)
+
+    # Retrieve the true and sampled biases, compute the true logits, and
+    # add the biases to the true and sampled logits.
+    all_b = embedding_ops.embedding_lookup(
+        biases, all_ids, partition_strategy=partition_strategy)
+    # true_b is a [batch_size * num_true] tensor
+    # sampled_b is a [num_sampled] float tensor
+    true_b = array_ops.slice(all_b, [0], array_ops.shape(labels_flat))
+    sampled_b = array_ops.slice(all_b, array_ops.shape(labels_flat), [-1])
+
+    # inputs shape is [batch_size, dim]
+    # true_w shape is [batch_size * num_true, dim]
+    # row_wise_dots is [batch_size, num_true, dim]
+    dim = array_ops.shape(true_w)[1:2]
+    new_true_w_shape = array_ops.concat([[-1, num_true], dim], 0)
+    row_wise_dots = math_ops.multiply(
+        array_ops.expand_dims(inputs, 1),
+        array_ops.reshape(true_w, new_true_w_shape))
+    # We want the row-wise dot plus biases which yields a
+    # [batch_size, num_true] tensor of true_logits.
+    dots_as_matrix = array_ops.reshape(row_wise_dots,
+                                       array_ops.concat([[-1], dim], 0))
+    true_logits = array_ops.reshape(_sum_rows(dots_as_matrix), [-1, num_true])
+    true_b = array_ops.reshape(true_b, [-1, num_true])
+    true_logits += true_b
+    sampled_logits += sampled_b
+
+    if remove_accidental_hits:
+      acc_hits = candidate_sampling_ops.compute_accidental_hits(
+          labels, sampled, num_true=num_true)
+      acc_indices, acc_ids, acc_weights = acc_hits
+      # The value of weights falls back to the smallest float number possible, which
+      # results in a -inf if added together.
+      acc_weights = clip_ops.clip_by_value(acc_weights, -10000, 10000)
+
+      # This is how SparseToDense expects the indices.
+      acc_indices_2d = array_ops.reshape(acc_indices, [-1, 1])
+      acc_ids_2d_int32 = array_ops.reshape(
+          math_ops.cast(acc_ids, dtypes.int32), [-1, 1])
+      sparse_indices = array_ops.concat([acc_indices_2d, acc_ids_2d_int32], 1,
+                                        "sparse_indices")
+      # Create sampled_logits_shape = [batch_size, num_sampled]
+      sampled_logits_shape = array_ops.concat(
+          [array_ops.shape(labels)[:1],
+           array_ops.expand_dims(num_sampled, 0)], 0)
+      if sampled_logits.dtype != acc_weights.dtype:
+        acc_weights = math_ops.cast(acc_weights, sampled_logits.dtype)
+      sampled_logits += sparse_ops.sparse_to_dense(
+          sparse_indices,
+          sampled_logits_shape,
+          acc_weights,
+          default_value=0.0,
+          validate_indices=False)
+
+    if subtract_log_q:
+      # Subtract log of Q(l), prior probability that l appears in sampled.
+      true_logits -= math_ops.log(true_expected_count)
+      sampled_logits -= math_ops.log(sampled_expected_count)
+
+    # Construct output logits and labels. The true labels/logits start at col 0.
+    out_logits = array_ops.concat([true_logits, sampled_logits], 1)
+
+    # true_logits is a float tensor, ones_like(true_logits) is a float
+    # tensor of ones. We then divide by num_true to ensure the per-example
+    # labels sum to 1.0, i.e. form a proper probability distribution.
+    out_labels = array_ops.concat([
+        array_ops.ones_like(true_logits) / num_true,
+        array_ops.zeros_like(sampled_logits)
+    ], 1)
+
+    return out_logits, out_labels
+
 def sampled_softmax_logits(weights,
                                     biases,
                                     labels,
@@ -65,7 +217,7 @@ def sampled_softmax_logits(weights,
                                     name='sampled_softmax_logits',
                                     subtract_log_q=True,
                                     seed=None):
-  logits, labels = tf.nn.compute_sampled_logits(
+  logits, labels = _compute_sampled_logits(
       weights=weights,
       biases=biases,
       labels=labels,
@@ -1333,7 +1485,7 @@ class SoftmaxLayer(quant_utils.QuantizableLayer):
 
     # Delegates to _FProp2D.
     xent_loss = self._FProp2D(theta, inputs, class_weights, class_ids,
-                              class_probabilities)
+                              class_probabilities, activation=activation)
 
     # Reshapes xent_loss fields according to the inputs' shape.
     xent_loss.logits = tf.reshape(
@@ -1477,7 +1629,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
     
     last_dim = tf.shape(activation)[-1]
     inp = tf.reshape(activation, [-1, last_dim])
-    logits = py_utils.Matmul(inp, theta.gating)
+    # logits = py_utils.Matmul(inp, theta.gating)
     
     preceding_shape = tf.shape(inp)[:-1]
     prob_1 = tf.ones(shape=preceding_shape)
@@ -1487,7 +1639,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
     probs = tf.stack([prob_1, prob_1 * temperature], axis=-1)
     return probs
 
-  def Logits(self, theta, inputs):
+  def Logits(self, theta, inputs, activation=None):
     """Returns the logits computed before the softmax.
 
     Args:
@@ -1500,7 +1652,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
       logits [batch, num_classes]
     """
     return self._LogitsUsingConcatenatedWeights(
-        self._ConcatWeights(theta), self._GetInputs(inputs))
+        self._ConcatWeights(theta), self._GetInputs(inputs), activation=activation)
 
   def _XentLossByChunk(self, theta, activation, class_ids):
     """Computes per-example xent loss between activation and class_ids."""
@@ -1567,7 +1719,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
     """Computes xent loss and log-prob logit."""
     p = self.params
     inputs = self._GetInputs(inputs)
-    logits = self.Logits(theta, inputs)
+    logits = self.Logits(theta, inputs, activation=activation)
 
     if class_probabilities is not None:
       per_example_xent = tf.nn.softmax_cross_entropy_with_logits(
@@ -1597,7 +1749,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
         per_example_xent = tf.nn.sampled_softmax_loss(
             weights=[theta['weight_%d' % i] for i in range(p.num_shards)],
             biases=tf.concat(
-                [theta['bias_%d' % i] for i in range(p.num_shards)], axis=0),
+                [theta['bias_%d' % i] * 0.0 for i in range(p.num_shards)], axis=0),
             labels=tf.reshape(class_ids, [-1, 1]),
             inputs=self._GetInputs(inputs),
             num_sampled=p.num_sampled,
@@ -1610,7 +1762,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
             for i in range(p.num_shards)
         ]
         all_biases = [
-            tf.reshape(theta['bias_%d' % i], [num_classes_per_shard, p.num_roles])
+            tf.reshape(theta['bias_%d' % i], [num_classes_per_shard, p.num_roles]) * 0.0
             for i in range(p.num_shards)
         ]
         all_inputs = self._GetInputs(inputs)
@@ -1646,7 +1798,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
         gating_probs = self._GetGatingProbs(theta, activation)
         summed_logits = tf.reduce_sum(tf.stack(all_logits, axis=-1) * tf.expand_dims(gating_probs, axis=-2), axis=-1)
           # summed_logits = tf.reduce_sum(tf.stack(all_logits, axis=-1), axis=-1) / 2
-        per_example_xent = nn_ops.softmax_cross_entropy_with_logits(
+        per_example_xent = tf.nn.softmax_cross_entropy_with_logits(
           labels=labels, logits=summed_logits)
 
       # Avoid computing logits; per_example_argmax is going to be always right.

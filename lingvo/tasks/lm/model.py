@@ -108,7 +108,6 @@ class LanguageModel(base_model.BaseTask):
         weights) / (
             num_preds + 1e-4)
     if p.lm.emb.cls == layers.HRREmbeddingLayer:
-      signature = xent_output.signature
       if p.train.isometric > 0.0:
         isometric_constraint = 0.0
         nr = p.lm.emb.num_roles
