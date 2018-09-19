@@ -198,9 +198,10 @@ class RnnLmNoEmbedding(BaseLanguageModel):
         'If > 0, then the number of dimensions of direct features '
         'that bypass the RNN and are provided directly to the softmax '
         'input.')
+    p.Define('decoded_filler_keep_prob', 1.0, 'Keep prob for the decoded (noisy) filler embedding')
     p.Define('num_word_roles', 0, 'Number of roles on word level')
     p.Define('num_sent_roles', 0, 'Number of top/sentence level roles')
-    p.Define('sent_role_anneal', 0, 'Anneal to 1.0 until this step.')
+    p.Define('sent_role_anneal', 0.0, 'Anneal to 1.0 until this step.')
     p.Define('use_chunks', False, 'Whether to include chunk loss')
     p.Define('pred_mode', 'trigram', 'Prediction mode')
     return p
@@ -456,8 +457,8 @@ class RnnLmNoEmbedding(BaseLanguageModel):
 
       preceding_shape = tf.shape(activation)[:-1]
       f_noisy = self.emb.decode(tf.expand_dims(activation, axis=-2), emb_weights.r) # This is actually a bit hacky -- you don't know you have emb attribute
-      if not p.is_eval:
-        f_noisy = tf.nn.dropout(f_noisy, 0.5)
+      if p.decoded_filler_keep_prob > 0 and not p.is_eval:
+        f_noisy = tf.nn.dropout(f_noisy, p.decoded_filler_keep_prob)
 
       cat = tf.reshape(f_noisy, tf.concat([preceding_shape, [p.softmax.input_dim]], axis=0))
       out = forward('softmax', cat, h=activation)
@@ -465,7 +466,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
       if p.num_sent_roles > 0:
         out.lower_roles = lower_sent_role_probs
         out.emb = inputs
-        if p.gold_chunks and not step_inference: # skip chunk loss in step inference mode
+        if p.use_chunks and not step_inference: # skip chunk loss in step inference mode
           with tf.name_scope('chunk_prediction'):
             last_dim = tf.shape(sent_act)[-1]
             w = tf.reshape(tf.matmul(tf.reshape(inputs, [-1, last_dim]), theta.A), [-1, 2, last_dim])

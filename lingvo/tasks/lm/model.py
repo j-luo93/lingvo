@@ -46,6 +46,7 @@ class LanguageModel(base_model.BaseTask):
         'Sum the logP across predicted tokens in batch when set to True; '
         'average across predicted tokens in batch o/w (default).')
     tp.Define('isometric', 0.0, 'Weight for isometric constraint')
+    tp.Define('chunk_loss_anneal', 0.0, 'Anneal weight for chunk loss to 1.0 at this many steps')
 
     tp.lr_schedule = lr_schedule.PiecewiseConstantLearningRateSchedule.Params(
     ).Set(
@@ -157,7 +158,6 @@ class LanguageModel(base_model.BaseTask):
     if p.lm.use_chunks and not p.is_eval:
       with tf.name_scope('global_decode'):
         assert p.lm.num_sent_roles > 0
-        assert p.lm.global_decode
         role_probs = xent_output.lower_roles
         py_utils.HasRank(weights, 2)
         emb = xent_output.emb * tf.expand_dims(weights, axis=-1)
@@ -166,7 +166,7 @@ class LanguageModel(base_model.BaseTask):
         bound = layers.HRREmbeddingLayer.static_circular_conv(roles, emb) # size: sl x bs x d
         total_chunk_loss = -tf.reduce_sum(xent_output.chunk_log_probs)
         global_step = tf.to_float(py_utils.GetOrCreateGlobalStep())
-        temperature = tf.minimum(tf.constant(50000.0), global_step) / 50000.0
+        temperature = tf.minimum(tf.constant(p.train.chunk_loss_anneal), global_step) / p.train.chunk_loss_anneal
         tf.summary.scalar('chunk/temperature', temperature)
         total_chunk_loss *= temperature
         chunk_loss = total_chunk_loss / xent_output.num_chunks
@@ -191,7 +191,7 @@ class LanguageModel(base_model.BaseTask):
       metrics['isometric'] = (isometric_loss, 1)
     if 'chunk_loss' in locals():
       tmp_loss += chunk_loss
-      metrics['chunk_loss'] = (chunk_loss, split_count)
+      metrics['chunk_loss'] = (chunk_loss, 1)
       metrics['avg_chunk_loss'] = (avg_chunk_loss, xent_output.num_chunks)
       metrics['num_chunks'] = (xent_output.num_chunks, 1)
     metrics['loss'] = (tmp_loss, num_preds)

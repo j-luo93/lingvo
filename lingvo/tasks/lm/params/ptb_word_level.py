@@ -236,6 +236,7 @@ class WordLevelPTBSimpleSoftmaxHRR(WordLevelPTBSimpleSoftmaxAdam23):
     # TODO(jmluo)
     # add dropout for r and F
     p.lm.softmax.num_roles = cls.NUM_ROLES
+    p.lm.decoded_filler_keep_prob = 0.5
     return p
 
 @model_registry.RegisterSingleTaskModel
@@ -316,9 +317,9 @@ word-level HRR on chunk data
 @model_registry.RegisterSingleTaskModel
 class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50CGRA(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50GRA):
 
-  CORPUS_DIR = os.path.join('/cns/jn-d/home/jmluo/brain/rs=6.3/',
-                            'data/ptb/chunk/')
-  WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.chunk')
+  CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
+                            'data/ptb-chunk')
+  WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
   NUM_SAMPLED = 6335
   VOCAB_SIZE = 6336  # includes <epsilon>, vocabulary in fst symtable format
 
@@ -326,11 +327,11 @@ class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50CGRA(WordLevelPTBSimpleSoftmaxH
   @classmethod
   def Train(cls):
     p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50CGRA, cls).Train()
-    p.gold_chunks = True
+    p.use_chunks = True
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'train.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'train.txt')
     p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
-    p.bucket_batch_limit = [64] * len(p.bucket_upper_bound)
+    p.bucket_batch_limit = [256, 128, 64, 32, 32, 16, 16, 4, 2]
     return p
 
   @classmethod
@@ -338,7 +339,7 @@ class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50CGRA(WordLevelPTBSimpleSoftmaxH
     p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50CGRA, cls).Dev()
     p.num_samples = 1006
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'dev.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'dev.txt')
     return p
 
   @classmethod
@@ -346,50 +347,52 @@ class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50CGRA(WordLevelPTBSimpleSoftmaxH
     p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50CGRA, cls).Test()
     p.num_samples = 1006
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'test.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'test.txt')
     return p
 
 @model_registry.RegisterSingleTaskModel
 class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR2CGRA(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50GRA):
 
-  CORPUS_DIR = os.path.join('/cns/jn-d/home/jmluo/brain/rs=6.3/',
-                            'data/ptb/chunk/')
-  WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.chunk')
+  CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
+                            'data/ptb-chunk')
+  WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
   NUM_SAMPLED = 6335
   VOCAB_SIZE = 6336  # includes <epsilon>, vocabulary in fst symtable format
 
   @classmethod
   def Train(cls):
-    p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR3CGRA, cls).Train()
-    p.gold_chunks = True
+    p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR2CGRA, cls).Train()
+    p.use_chunks = True
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'train.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'train.txt')
     p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
-    p.bucket_batch_limit = [64] * len(p.bucket_upper_bound)
+    p.bucket_batch_limit = [256, 128, 64, 32, 32, 16, 16, 4, 2]
     return p
 
   @classmethod
   def Dev(cls):
-    p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR3CGRA, cls).Dev()
+    p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR2CGRA, cls).Dev()
     p.num_samples = 1006
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'dev.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'dev.txt')
     return p
 
   @classmethod
   def Test(cls):
-    p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR3CGRA, cls).Test()
+    p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR2CGRA, cls).Test()
     p.num_samples = 1006
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'test.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'test.txt')
     return p
 
   @classmethod
   def Task(cls):
-    p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR3CGRA, cls).Task()
+    p = super(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR2CGRA, cls).Task()
     # TODO(jmluo) need to rename this -- I'm still using chunk loss but there is no r_o prediction.
+    p.train.chunk_loss_anneal = 3000.0
     p.lm.use_chunks = True
     p.lm.num_sent_roles = 2
+    p.lm.sent_role_anneal = 1500.0
     p.lm.num_word_roles = 2
     for tpl in p.lm.rnns.cell_tpl:
       tpl.num_output_nodes = 2 * cls.EMBEDDING_DIM
@@ -415,20 +418,20 @@ Baseline with tied embeddings on chunk data
 @model_registry.RegisterSingleTaskModel
 class WordLevelPTBSimpleSoftmaxTieC(WordLevelPTBSimpleSoftmaxTie):
 
-  CORPUS_DIR = os.path.join('/cns/jn-d/home/jmluo/brain/rs=6.3/',
-                            'data/ptb/chunk/')
-  WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.chunk')
+  CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
+                            'data/ptb-chunk')
+  WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
   NUM_SAMPLED = 6335
   VOCAB_SIZE = 6336  # includes <epsilon>, vocabulary in fst symtable format
 
   @classmethod
   def Train(cls):
     p = super(WordLevelPTBSimpleSoftmaxTieC, cls).Train()
-    p.gold_chunks = True
+    p.use_chunks = True
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'train.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'train.txt')
     p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
-    p.bucket_batch_limit = [64] * len(p.bucket_upper_bound)
+    p.bucket_batch_limit = [256, 128, 64, 32, 32, 16, 16, 4, 2]
     return p
 
   @classmethod
@@ -436,7 +439,7 @@ class WordLevelPTBSimpleSoftmaxTieC(WordLevelPTBSimpleSoftmaxTie):
     p = super(WordLevelPTBSimpleSoftmaxTieC, cls).Dev()
     p.num_samples = 1006
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'dev.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'dev.txt')
     return p
 
   @classmethod
@@ -444,6 +447,6 @@ class WordLevelPTBSimpleSoftmaxTieC(WordLevelPTBSimpleSoftmaxTie):
     p = super(WordLevelPTBSimpleSoftmaxTieC, cls).Test()
     p.num_samples = 1006
     p.file_pattern = 'text:' + os.path.join(
-        cls.CORPUS_DIR, 'test.chunk.sst-00000-of-00001')
+        cls.CORPUS_DIR, 'test.txt')
     return p
 
