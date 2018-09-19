@@ -508,8 +508,9 @@ class RnnLmNoEmbedding(BaseLanguageModel):
 
             bs_indices = tf.tile(tf.expand_dims(tf.range(batch), axis=0), [seqlen, 1])
             sl_indices = tf.tile(tf.expand_dims(tf.range(seqlen), axis=1), [1, batch])
+            clen = tf.reduce_max(chunk_ids) + 1
             indices = tf.stack([bs_indices, chunk_ids, sl_indices], axis=-1) # size: sl x bs x 3
-            sm_shape = [batch, seqlen, seqlen] # size: bs x cl x sl
+            sm_shape = [batch, clen, seqlen] # size: bs x cl x sl
             ones = tf.ones_like(chunk_ids)
             sm = tf.to_float(tf.scatter_nd(indices, ones, sm_shape))
             # TODO(jmluo): I don't even remember what sm stands for. Summation matrix?
@@ -581,9 +582,9 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             
 
             gold1, gold2 = tf.unstack(target_chunk_emb, axis=1)
-            merged_indices = tf.reshape(tf.range(batch * seqlen), [batch, -1])
-            dot1 = mm3by2(f_hat1, tf.reshape(gold1, [batch * seqlen, -1]), transpose=True) # bs x cl x bs*cl
-            dot2 = mm3by2(f_hat2, tf.reshape(gold2, [batch * seqlen, -1]), transpose=True) # bs x cl x bs*cl
+            merged_indices = tf.reshape(tf.range(batch * clen), [batch, -1])
+            dot1 = mm3by2(f_hat1, tf.reshape(gold1, [batch * clen, -1]), transpose=True) # bs x cl x bs*cl
+            dot2 = mm3by2(f_hat2, tf.reshape(gold2, [batch * clen, -1]), transpose=True) # bs x cl x bs*cl
             global_step = tf.to_float(py_utils.GetOrCreateGlobalStep())
             temperature = tf.minimum(tf.constant(p.sent_role_anneal), global_step) / p.sent_role_anneal
             tf.summary.scalar('temperature', temperature)
@@ -596,10 +597,10 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             inter_res.dot = den_dot
 
             with tf.name_scope('chunk_loss'):
-              delta = tf.scatter_nd(last_pred_pos_indices, -tf.ones([batch]), [batch, seqlen])
+              delta = tf.scatter_nd(last_pred_pos_indices, -tf.ones([batch]), [batch, clen])
               chunk_weights = chunk_weights + delta
 
-              one_hot_target = tf.one_hot(merged_indices, batch * seqlen, off_value=1e-8)
+              one_hot_target = tf.one_hot(merged_indices, batch * clen, off_value=1e-8)
               den_dot = den_dot + tf.reshape(chunk_weights * 99.0 - 99.0, [-1])
               chunk_log_probs = tf.reduce_sum(one_hot_target * tf.nn.log_softmax(den_dot), axis=-1)
               out.chunk_log_probs = chunk_log_probs * chunk_weights

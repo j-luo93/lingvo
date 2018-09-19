@@ -155,28 +155,23 @@ class LanguageModel(base_model.BaseTask):
           tf.summary.histogram('rs', tf.stack(rs_all))
         isometric_loss = isometric_constraint * p.train.isometric
 
-    if p.lm.use_chunks and not p.is_eval:
+    if p.lm.use_chunks:# and not p.is_eval:
       with tf.name_scope('global_decode'):
         assert p.lm.num_sent_roles > 0
-        role_probs = xent_output.lower_roles
-        py_utils.HasRank(weights, 2)
-        emb = xent_output.emb * tf.expand_dims(weights, axis=-1)
-        roles = py_utils.Matmul(role_probs, theta.lm.R)
-        roles = tf.reshape(roles, [seqlen, batch_size, -1])
-        bound = layers.HRREmbeddingLayer.static_circular_conv(roles, emb) # size: sl x bs x d
         total_chunk_loss = -tf.reduce_sum(xent_output.chunk_log_probs)
+        avg_chunk_loss = total_chunk_loss / xent_output.num_chunks
         global_step = tf.to_float(py_utils.GetOrCreateGlobalStep())
         temperature = tf.minimum(tf.constant(p.train.chunk_loss_anneal), global_step) / p.train.chunk_loss_anneal
         tf.summary.scalar('chunk/temperature', temperature)
-        total_chunk_loss *= temperature
-        chunk_loss = total_chunk_loss / xent_output.num_chunks
-        avg_chunk_loss = chunk_loss
+        annealed_total_chunk_loss = temperature * total_chunk_loss
+        annealed_avg_chunk_loss = temperature * avg_chunk_loss
+        chunk_loss = annealed_avg_chunk_loss
 
     loss = xent_output.avg_xent
     if p.train.sum_loss_across_tokens_in_batch:
       loss = xent_output.total_xent
       if 'chunk_loss' in locals():
-        chunk_loss = total_chunk_loss
+        chunk_loss = annealed_total_chunk_loss
 
     metrics = {
         'fraction_of_correct_next_step_preds': (mean_acc, num_preds),
@@ -192,6 +187,9 @@ class LanguageModel(base_model.BaseTask):
     if 'chunk_loss' in locals():
       tmp_loss += chunk_loss
       metrics['chunk_loss'] = (chunk_loss, 1)
+      metrics['annealed_total_chunk_loss'] = (annealed_total_chunk_loss, 1)
+      metrics['annealed_avg_chunk_loss'] = (annealed_avg_chunk_loss, xent_output.num_chunks)
+      metrics['total_chunk_loss'] = (total_chunk_loss, 1)
       metrics['avg_chunk_loss'] = (avg_chunk_loss, xent_output.num_chunks)
       metrics['num_chunks'] = (xent_output.num_chunks, 1)
     metrics['loss'] = (tmp_loss, num_preds)
