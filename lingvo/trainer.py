@@ -980,8 +980,9 @@ class RunnerManager(object):
     if not FLAGS.run_locally:
       # Do nothing
       return
-
-    FLAGS.tf_master = tf.train.Server.create_local_server().target
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    FLAGS.tf_master = tf.train.Server.create_local_server(config=config).target
 
     if not FLAGS.mode:
       FLAGS.mode = 'sync'

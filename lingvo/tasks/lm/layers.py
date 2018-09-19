@@ -193,6 +193,8 @@ class RnnLmNoEmbedding(BaseLanguageModel):
              'The stacked-RNNs layer params.')
     p.Define('softmax', layers.SimpleFullSoftmax.Params(),
              'The softmax layer params.')
+    p.Define('pred', layers.ProjectionLayer.Params(),
+             'The projection layer params.')
     p.Define(
         'direct_features_dim', 0,
         'If > 0, then the number of dimensions of direct features '
@@ -248,14 +250,36 @@ class RnnLmNoEmbedding(BaseLanguageModel):
           cc_inp = cc_dim
         elif p.pred_mode == 'trigram':
           cc_inp = 2 * cc_dim
+        elif p.pred_mode == 'rnn':
+          cc_inp = cc_dim
         else:
           raise
-        pred_pc = py_utils.WeightParams(
-          shape=[cc_inp, cc_dim], # HACK
+        if p.pred_mode == 'rnn':  
+          p.pred = p.rnns.Copy()
+          p.pred.name = 'pred'
+          p.pred.cell_tpl[0].num_input_nodes = cc_inp
+          p.pred.cell_tpl[0].num_output_nodes = cc_dim
+          
+        else:
+          p.pred = layers.ProjectionLayer.Params()
+          p.pred.name = 'pred'
+          p.pred.input_dim = cc_inp
+          p.pred.output_dim = cc_dim
+          p.pred.activation = 'TANH'
+          p.pred.batch_norm = False
+        self.CreateChild('pred', p.pred)
+        SOS_pc = py_utils.WeightParams(
+          shape=[cc_dim], # HACK
           init=p.params_init,
           dtype=p.dtype,
           collections=[self.__class__.__name__ + '_vars'])
-        self.CreateVariable('pred', pred_pc)
+        EOS_pc = py_utils.WeightParams(
+          shape=[p.num_sent_roles, cc_dim], # HACK
+          init=p.params_init,
+          dtype=p.dtype,
+          collections=[self.__class__.__name__ + '_vars'])
+        self.CreateVariable('chunk_SOS', SOS_pc)
+        self.CreateVariable('chunk_EOS', EOS_pc)
           
         # used for constructing two orthogonal contextualized word embeddings
         A_pc = py_utils.WeightParams(
@@ -469,7 +493,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
         if p.use_chunks and not step_inference: # skip chunk loss in step inference mode
           with tf.name_scope('chunk_prediction'):
             last_dim = tf.shape(sent_act)[-1]
-            w = tf.reshape(tf.matmul(tf.reshape(inputs, [-1, last_dim]), theta.A), [-1, 2, last_dim])
+            w = tf.reshape(tf.matmul(tf.reshape(inputs, [-1, last_dim]), theta.A), [-1, p.num_sent_roles, last_dim])
             rw = HRREmbeddingLayer.static_circular_conv(theta.R, w)
 
             inter_res.chunk_ids = chunk_ids
@@ -477,7 +501,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             inter_res.rw = rw
 
             clean_w = tf.expand_dims(lower_sent_role_probs, axis=-1) * w # size: sl*bs x 2 x d
-            clean_w = tf.transpose(tf.reshape(clean_w, [seqlen, batch, 2, last_dim]), perm=[1, 2, 0, 3]) # size: bs x 2 x sl x d
+            clean_w = tf.transpose(tf.reshape(clean_w, [seqlen, batch, p.num_sent_roles, last_dim]), perm=[1, 2, 0, 3]) # size: bs x 2 x sl x d
             out.cce = clean_w
             inter_res.w_clean = clean_w
 
@@ -488,21 +512,35 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             sm_shape = [batch, seqlen, seqlen] # size: bs x cl x sl
             ones = tf.ones_like(chunk_ids)
             sm = tf.to_float(tf.scatter_nd(indices, ones, sm_shape))
-
             # TODO(jmluo): I don't even remember what sm stands for. Summation matrix?
             inter_res.sm = sm
+
+            max_chunk_id = tf.reduce_max(sm, axis=-1) # size: bs x cl
+            chunk_len = tf.to_int32(tf.reduce_max(max_chunk_id, axis=-1)) # size: bs
+            chunk_weights = tf.concat([tf.to_float(max_chunk_id > 0)[:, 1:], tf.ones([batch, 1])], axis=-1) # size: bs x cl
+            # chunk weight offset positions
+            last_pred_pos_indices = tf.stack([tf.range(batch), chunk_len], axis=-1) # size: bs x 2
 
             bound_w = tf.reduce_sum(tf.expand_dims(lower_sent_role_probs, axis=-1) * rw, axis=-2) # size: sl*bs x d
             bound_w = tf.transpose(tf.reshape(bound_w, [seqlen, batch, last_dim]), perm=[1, 0, 2]) # size: bs x sl x d
             chunk_emb = tf.matmul(sm, bound_w, name='chunk_e') # size: bs x cl x d
-            chunk_emb = tf.nn.l2_normalize(chunk_emb)
-            clean_chunk_emb = tf.matmul(tf.tile(tf.expand_dims(sm, axis=1), [1, 2, 1, 1]), clean_w, name='chunk_f') # size: bs x 2 x cl x d
-            clean_chunk_emb = tf.nn.l2_normalize(clean_chunk_emb)
-
+            clean_chunk_emb = tf.matmul(tf.tile(tf.expand_dims(sm, axis=1), [1, p.num_sent_roles, 1, 1]), clean_w, name='chunk_f') # size: bs x 2 x cl x d
             inter_res.bound_w = bound_w
             inter_res.ce = chunk_emb
             inter_res.cce = clean_chunk_emb
 
+            # get input chunks and target chunks
+            SOS_emb = tf.tile(tf.reshape(theta.chunk_SOS, [1, 1, -1]), [batch, 1, 1])
+            input_chunk_emb = tf.concat([SOS_emb, chunk_emb[:, 1:]], axis=1) # replace the first chunk with chunk_emb embedding
+            # input_chunk_emb = tf.nn.l2_normalize(input_chunk_emb, axis=-1)
+            EOS_emb = tf.tile(tf.reshape(theta.chunk_EOS, [1, p.num_sent_roles, 1, -1]), [batch, 1, 1, 1])
+            target_chunk_emb = tf.concat([clean_chunk_emb[:, :, 1:], EOS_emb], axis=2) # move EOS_emb to the end of sentences. After all paddings!
+            
+            # only normalize target embeddings (these are ground truth embeddings)
+            target_chunk_emb = tf.nn.l2_normalize(target_chunk_emb, axis=-1)
+            inter_res.input_chunk_emb = input_chunk_emb
+            inter_res.target_chunk_emb = target_chunk_emb
+            
             def mm3by2(x, y, transpose=False):
               with tf.name_scope('mm3by2'):
                 py_utils.HasRank(x, 3)
@@ -512,30 +550,40 @@ class RnnLmNoEmbedding(BaseLanguageModel):
                 return tf.reshape(tf.matmul(tf.reshape(x, [bs * sl, dx]), y, transpose_b=transpose), [bs, sl, dy])
 
             def get_predictions(chunk_emb):
-              if p.pred_mode == 'bigram':
+              if p.pred_mode == 'rnn':
+                input_ = tf.transpose(chunk_emb, [1, 0, 2])
+                sent_state0 = self.pred.zero_state(batch)
+                sent_paddings = tf.expand_dims(1.0 - tf.transpose(chunk_weights), 2) # NOTE this happens before deltas are applied
+                h_chunk, _ = self.pred.FProp(theta.pred, input_, sent_paddings, sent_state0)
+                return tf.transpose(h_chunk, [1, 0, 2])
+              elif p.pred_mode == 'bigram':
                 cat = chunk_emb
               elif p.pred_mode == 'trigram':
                 # note that length dim is the second axis
                 bs, cl, d = tf.unstack(tf.shape(chunk_emb))
                 prev = tf.concat([tf.zeros([bs, 1, d]), chunk_emb[:, :-1]], axis=1)
                 cat = tf.concat([prev, chunk_emb], axis=-1)
-              h_chunk = mm3by2(tf.tanh(cat), theta.pred) # size: bs x cl x d
+              elif p.pred_mode == 'rnn':
+                cat = chunk_emb
+              # h_chunk = mm3by2(tf.tanh(cat), theta.pred) # size: bs x cl x d
+              h_chunk = self.pred.FProp(theta.pred, cat)
               return h_chunk
 
-            # pred before cleanup
-            h_chunk = get_predictions(chunk_emb)
+            h_chunk = get_predictions(input_chunk_emb)
             f_chunk = HRREmbeddingLayer.static_circular_corr(theta.R, tf.expand_dims(h_chunk, axis=-2)) # size: bs x cl x 2 x d
-            f_hat1, f_hat2 = tf.unstack(f_chunk[:, 1:-1], axis=-2)
-
+            last_pred = tf.reshape(tf.gather_nd(f_chunk, last_pred_pos_indices),  [batch, 1, p.num_sent_roles, -1]) 
+            f_chunk = tf.concat([f_chunk[:, :-1], last_pred], axis=1)
+            f_hat1, f_hat2 = tf.unstack(f_chunk, axis=-2)
             inter_res.h_chunk = h_chunk
             inter_res.f_chunk = f_chunk
             inter_res.f_hat1 = f_hat1
             inter_res.f_hat2 = f_hat2
+            
 
-            gold1, gold2 = tf.unstack(clean_chunk_emb[:, :, 2:], axis=1)
-            merged_indices = tf.reshape(tf.range(batch * (seqlen - 2)), [batch, -1])
-            dot1 = mm3by2(f_hat1, tf.reshape(gold1, [batch * (seqlen - 2), -1]), transpose=True) # bs x cl x bs*cl
-            dot2 = mm3by2(f_hat2, tf.reshape(gold2, [batch * (seqlen - 2), -1]), transpose=True) # bs x cl x bs*cl
+            gold1, gold2 = tf.unstack(target_chunk_emb, axis=1)
+            merged_indices = tf.reshape(tf.range(batch * seqlen), [batch, -1])
+            dot1 = mm3by2(f_hat1, tf.reshape(gold1, [batch * seqlen, -1]), transpose=True) # bs x cl x bs*cl
+            dot2 = mm3by2(f_hat2, tf.reshape(gold2, [batch * seqlen, -1]), transpose=True) # bs x cl x bs*cl
             global_step = tf.to_float(py_utils.GetOrCreateGlobalStep())
             temperature = tf.minimum(tf.constant(p.sent_role_anneal), global_step) / p.sent_role_anneal
             tf.summary.scalar('temperature', temperature)
@@ -547,10 +595,11 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             inter_res.dot2 = dot2
             inter_res.dot = den_dot
 
-
             with tf.name_scope('chunk_loss'):
-              chunk_weights = tf.to_float(tf.reduce_max(sm, axis=-1) > 0)[:, 2:] # size: bs x cl
-              one_hot_target = tf.one_hot(merged_indices, batch * (seqlen - 2), off_value=1e-8)
+              delta = tf.scatter_nd(last_pred_pos_indices, -tf.ones([batch]), [batch, seqlen])
+              chunk_weights = chunk_weights + delta
+
+              one_hot_target = tf.one_hot(merged_indices, batch * seqlen, off_value=1e-8)
               den_dot = den_dot + tf.reshape(chunk_weights * 99.0 - 99.0, [-1])
               chunk_log_probs = tf.reduce_sum(one_hot_target * tf.nn.log_softmax(den_dot), axis=-1)
               out.chunk_log_probs = chunk_log_probs * chunk_weights

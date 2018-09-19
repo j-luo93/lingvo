@@ -398,6 +398,15 @@ class WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR2CGRA(WordLevelPTBSimpleSoftm
       tpl.num_output_nodes = 2 * cls.EMBEDDING_DIM
     return p
 
+@model_registry.RegisterSingleTaskModel
+class WordLevelPTBChunkRNNHRR(WordLevelPTBSimpleSoftmaxHRRIsoR2TieNR2NF50SR2CGRA):
+  
+  @classmethod
+  def Task(cls):
+    p = super(WordLevelPTBChunkRNNHRR, cls).Task()
+    p.lm.pred_mode = 'rnn'
+    return p
+
 '''
 Baseline with Tied embeddings
 '''
