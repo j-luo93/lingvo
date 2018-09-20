@@ -193,8 +193,10 @@ class RnnLmNoEmbedding(BaseLanguageModel):
              'The stacked-RNNs layer params.')
     p.Define('softmax', layers.SimpleFullSoftmax.Params(),
              'The softmax layer params.')
-    p.Define('pred', layers.ProjectionLayer.Params(),
+    p.Define('pred_proj', layers.ProjectionLayer.Params(),
              'The projection layer params.')
+    p.Define('pred_rnn', rnn_layers.StackedFRNNLayerByLayer.Params(),
+             'The rnn layer for chunk prediction')
     p.Define(
         'direct_features_dim', 0,
         'If > 0, then the number of dimensions of direct features '
@@ -255,19 +257,9 @@ class RnnLmNoEmbedding(BaseLanguageModel):
         else:
           raise
         if p.pred_mode == 'rnn':  
-          p.pred = p.rnns.Copy()
-          p.pred.name = 'pred'
-          p.pred.cell_tpl[0].num_input_nodes = cc_inp
-          p.pred.cell_tpl[0].num_output_nodes = cc_dim
-          
+          self.CreateChild('pred_rnn', p.pred_rnn)
         else:
-          p.pred = layers.ProjectionLayer.Params()
-          p.pred.name = 'pred'
-          p.pred.input_dim = cc_inp
-          p.pred.output_dim = cc_dim
-          p.pred.activation = 'TANH'
-          p.pred.batch_norm = False
-        self.CreateChild('pred', p.pred)
+          self.CreateChild('pred_proj', p.pred_proj)
         SOS_pc = py_utils.WeightParams(
           shape=[cc_dim], # HACK
           init=p.params_init,
@@ -516,14 +508,14 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             # TODO(jmluo): I don't even remember what sm stands for. Summation matrix?
             inter_res.sm = sm
 
-            max_chunk_id = tf.reduce_max(sm, axis=-1) # size: bs x cl
-            chunk_len = tf.to_int32(tf.reduce_max(max_chunk_id, axis=-1)) # size: bs
-            chunk_weights = tf.concat([tf.to_float(max_chunk_id > 0)[:, 1:], tf.ones([batch, 1])], axis=-1) # size: bs x cl
+            non_empty = tf.reduce_max(sm, axis=-1) # size: bs x cl
+            last_chunk_id = tf.to_int32(tf.reduce_max(chunk_ids, axis=0)) # size: bs
+            chunk_weights = tf.concat([tf.to_float(non_empty > 0)[:, :-1], tf.ones([batch, 1])], axis=-1) # size: bs x cl
             # chunk weight offset positions
-            last_pred_pos_indices = tf.stack([tf.range(batch), chunk_len], axis=-1) # size: bs x 2
 
             bound_w = tf.reduce_sum(tf.expand_dims(lower_sent_role_probs, axis=-1) * rw, axis=-2) # size: sl*bs x d
             bound_w = tf.transpose(tf.reshape(bound_w, [seqlen, batch, last_dim]), perm=[1, 0, 2]) # size: bs x sl x d
+            
             chunk_emb = tf.matmul(sm, bound_w, name='chunk_e') # size: bs x cl x d
             clean_chunk_emb = tf.matmul(tf.tile(tf.expand_dims(sm, axis=1), [1, p.num_sent_roles, 1, 1]), clean_w, name='chunk_f') # size: bs x 2 x cl x d
             inter_res.bound_w = bound_w
@@ -553,9 +545,9 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             def get_predictions(chunk_emb):
               if p.pred_mode == 'rnn':
                 input_ = tf.transpose(chunk_emb, [1, 0, 2])
-                sent_state0 = self.pred.zero_state(batch)
+                sent_state0 = self.pred_rnn.zero_state(batch)
                 sent_paddings = tf.expand_dims(1.0 - tf.transpose(chunk_weights), 2) # NOTE this happens before deltas are applied
-                h_chunk, _ = self.pred.FProp(theta.pred, input_, sent_paddings, sent_state0)
+                h_chunk, _ = self.pred_rnn.FProp(theta.pred_rnn, input_, sent_paddings, sent_state0)
                 return tf.transpose(h_chunk, [1, 0, 2])
               elif p.pred_mode == 'bigram':
                 cat = chunk_emb
@@ -567,11 +559,12 @@ class RnnLmNoEmbedding(BaseLanguageModel):
               elif p.pred_mode == 'rnn':
                 cat = chunk_emb
               # h_chunk = mm3by2(tf.tanh(cat), theta.pred) # size: bs x cl x d
-              h_chunk = self.pred.FProp(theta.pred, cat)
+              h_chunk = self.pred_proj.FProp(theta.pred_proj, cat)
               return h_chunk
-
+            
             h_chunk = get_predictions(input_chunk_emb)
             f_chunk = HRREmbeddingLayer.static_circular_corr(theta.R, tf.expand_dims(h_chunk, axis=-2)) # size: bs x cl x 2 x d
+            last_pred_pos_indices = tf.stack([tf.range(batch), last_chunk_id], axis=-1) # size: bs x 2
             last_pred = tf.reshape(tf.gather_nd(f_chunk, last_pred_pos_indices),  [batch, 1, p.num_sent_roles, -1]) 
             f_chunk = tf.concat([f_chunk[:, :-1], last_pred], axis=1)
             f_hat1, f_hat2 = tf.unstack(f_chunk, axis=-2)
@@ -604,7 +597,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
               den_dot = den_dot + tf.reshape(chunk_weights * 99.0 - 99.0, [-1])
               chunk_log_probs = tf.reduce_sum(one_hot_target * tf.nn.log_softmax(den_dot), axis=-1)
               out.chunk_log_probs = chunk_log_probs * chunk_weights
-              out.num_chunks = tf.reduce_sum(chunk_weights)
+              out.num_chunks = tf.reduce_sum(chunk_weights) + 1e-8
 
               inter_res.w_chunk = chunk_weights
               inter_res.target = one_hot_target

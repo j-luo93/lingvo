@@ -1,4 +1,4 @@
-"""Train word-level LMs on PTB data."""
+"""Train word-level LMs on One Billion Words data."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -18,35 +18,36 @@ from lingvo.tasks.lm import layers as lm_layers
 from lingvo.tasks.lm import model
 
 '''
-PTB baseline with tied embeddings
+One Billion Words baseline with tied embeddings
 '''
 @model_registry.RegisterSingleTaskModel
-class PennBaseline(base_model_params.SingleTaskModelParams):
-  """Params for training a word-level LM on PTB."""
+class OneBillionBaseline(base_model_params.SingleTaskModelParams):
+  """Params for training a word-level LM on One Billion Words."""
 
   # One Billion Words benchmark corpus is available in iq, li and ok.
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
-                            'data/ptb/')
+                            'data/1b/')
   EMBEDDING_DIM = 512
   MAX_TOKENS = 512
-  NUM_EMBEDDING_SHARDS = 1
-  NUM_SAMPLED = 9999
-  NUM_SOFTMAX_SHARDS = 1
+  NUM_EMBEDDING_SHARDS = 8
+  NUM_SAMPLED = 4096
+  NUM_SOFTMAX_SHARDS = 8
   RNN_STATE_DIM = 512
-  VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
+  VOCAB_SIZE = 218160  # includes <epsilon>, vocabulary in fst symtable format
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
 
   @classmethod
   def Train(cls):
     p = lm_inp.LmInput.Params()
+    # p.use_sst = True
     p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
+    # p.bucket_batch_limit = [256, 128, 128, 64, 64, 32, 16, 8, 4]
     p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
-    #p.bucket_batch_limit = [64] * len(p.bucket_upper_bound) # [1024, 512, 256, 256, 128, 128, 64, 32, 16]
     p.file_buffer_size = 10000000
     p.file_parallelism = 10
     p.file_pattern = 'text:' + os.path.join(
         cls.CORPUS_DIR, 'train.txt')
-    p.name = 'ptb_train_set'
+    p.name = '1b_train_set'
     p.tokenizer = tokenizers.VocabFileTokenizer.Params()
     p.tokenizer.normalization = ''
     p.num_batcher_threads = 16
@@ -68,9 +69,9 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p.file_parallelism = 1
     p.file_pattern = 'text:' + os.path.join(
         cls.CORPUS_DIR, 'dev.txt')
-    p.name = 'ptb_dev_set'
+    p.name = '1b_dev_set'
     p.num_batcher_threads = 1
-    p.num_samples = 3370  # Number of sentences to evaluate on.
+    p.num_samples = 6206  # Number of sentences to evaluate on.
     return p
 
   @classmethod
@@ -83,9 +84,9 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p.file_parallelism = 1
     p.file_pattern = 'text:' + os.path.join(
         cls.CORPUS_DIR, 'test.txt')
-    p.name = 'ptb_test_set'
+    p.name = '1b_test_set'
     p.num_batcher_threads = 1
-    p.num_samples = 3761  # Number of sentences to evaluate on.
+    p.num_samples = 6075  # Number of sentences to evaluate on.
     return p
 
   @classmethod
@@ -128,7 +129,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p.name = 'ptb_word_level_lm'
     p.eval.samples_per_summary = 10000
 
-    p.lm = cls.get_lm_params(1, 0.5)
+    p.lm = cls.get_lm_params(1, 0.75)
     
     # Adjusts training params.
     tp = p.train
@@ -153,6 +154,18 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     tp.summary_interval_steps = 20
     
     ######################### stuff I added to the base ########################
+    num_input_dim = p.lm.softmax.input_dim
+    # Tie input and output embeddings
+    p.lm.softmax = layers.SimpleFullSoftmax.Params()
+    p.lm.softmax.input_dim = num_input_dim
+    p.lm.softmax.num_classes = cls.VOCAB_SIZE
+    p.lm.softmax.num_sampled = cls.NUM_SAMPLED
+    p.lm.softmax.num_shards = cls.NUM_SOFTMAX_SHARDS
+    p.lm.tie = True
+    p.lm.softmax.tie = True
+    # NOTE this makes tying input and output embeddings much easier
+    p.lm.emb.partition_strategy = 'div'
+    assert p.lm.softmax.num_classes % p.lm.softmax.num_shards == 0
 
     p.train.optimizer = optimizer.Adam.Params()
     p.train.learning_rate = 2e-3
@@ -197,7 +210,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
 Word level HRR, with num_fillers = 50
 '''
 @model_registry.RegisterSingleTaskModel
-class PennHRRWordLevelNF50(PennBaseline):
+class OneBillionHRRWordLevelNF50(OneBillionBaseline):
   """Use sampled soft-max in training."""
 
   NUM_ROLES = 2
@@ -205,7 +218,7 @@ class PennHRRWordLevelNF50(PennBaseline):
 
   @classmethod
   def Task(cls):
-    p = super(PennHRRWordLevelNF50, cls).Task()
+    p = super(OneBillionHRRWordLevelNF50, cls).Task()
     old_params = p.lm.emb
     hrr = lm_layers.HRREmbeddingLayer.Params()
     hrr.s = old_params.Copy()
@@ -221,122 +234,94 @@ class PennHRRWordLevelNF50(PennBaseline):
     p.lm.softmax.num_roles = cls.NUM_ROLES
     p.lm.softmax.input_dim *= cls.NUM_ROLES # size: |V| x nr*d
     # dropout for f_noisy
-    p.lm.decoded_filler_keep_prob = 0.5
+    p.lm.decoded_filler_keep_prob = 0.75
     # annealing for second role
-    p.lm.softmax.role_anneal = 3000
+    p.lm.softmax.role_anneal = 10000
     # isometric loss
     p.train.isometric = 1e4
 
     return p
 
 @model_registry.RegisterSingleTaskModel
-class PennHRRWordLevelNF100(PennHRRWordLevelNF50): 
+class OneBillionHRRWordLevelNF100(OneBillionHRRWordLevelNF50): 
 
   NUM_FILLERS_PER_ROLE = 100
 
 @model_registry.RegisterSingleTaskModel
-class PennHRRWordLevelNF250(PennHRRWordLevelNF50): 
+class OneBillionHRRWordLevelNF250(OneBillionHRRWordLevelNF50): 
 
   NUM_FILLERS_PER_ROLE = 250
 
 
 '''
-PTB baseline with tied embeddings on tagged data (chunks).
+One Billion Words baseline with tied embeddings on tagged data (chunks).
 '''
 @model_registry.RegisterSingleTaskModel
-class PennTaggedBaseline(PennBaseline):
+class OneBillionTaggedBaseline(OneBillionBaseline):
 
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
-                            'data/ptb-chunk')
+                            'data/1b-chunk')
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
-  NUM_SAMPLED = 6335
-  VOCAB_SIZE = 6336  # includes <epsilon>, vocabulary in fst symtable format
+  VOCAB_SIZE = 218168  # includes <epsilon>, vocabulary in fst symtable format
 
   @classmethod
   def Train(cls):
-    p = super(PennTaggedBaseline, cls).Train()
+    p = super(OneBillionTaggedBaseline, cls).Train()
     p.use_chunks = True
     p.bucket_upper_bound = [b * 2 for b in [10, 20, 30, 40, 50, 100, 256, 512, 1024]]
-    return p
-
-  @classmethod
-  def Dev(cls):
-    p = super(PennTaggedBaseline, cls).Dev()
-    p.num_samples = 1006
-    return p
-
-  @classmethod
-  def Test(cls):
-    p = super(PennTaggedBaseline, cls).Test()
-    p.num_samples = 1006
     return p
 
 '''
 word-level HRR on chunk data
 '''
 @model_registry.RegisterSingleTaskModel
-class PennTaggedHRRWordLevelNF50(PennHRRWordLevelNF50):
+class OneBillionTaggedHRRWordLevelNF50(OneBillionHRRWordLevelNF50):
 
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
-                            'data/ptb-chunk')
+                            'data/1b-chunk')
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
-  NUM_SAMPLED = 6335
-  VOCAB_SIZE = 6336  # includes <epsilon>, vocabulary in fst symtable format
+  VOCAB_SIZE = 218168  # includes <epsilon>, vocabulary in fst symtable format
 
 
   @classmethod
   def Train(cls):
-    p = super(PennTaggedHRRWordLevelNF50, cls).Train()
+    p = super(OneBillionTaggedHRRWordLevelNF50, cls).Train()
     p.use_chunks = True
     p.bucket_upper_bound = [b * 2 for b in [10, 20, 30, 40, 50, 100, 256, 512, 1024]]
-    return p
-
-  @classmethod
-  def Dev(cls):
-    p = super(PennTaggedHRRWordLevelNF50, cls).Dev()
-    p.num_samples = 1006
-    return p
-
-  @classmethod
-  def Test(cls):
-    p = super(PennTaggedHRRWordLevelNF50, cls).Test()
-    p.num_samples = 1006
     return p
 
 '''
 Full model. Chunk-level HRR. 
 '''
 @model_registry.RegisterSingleTaskModel
-class PennTaggedHRRChunkLevelNF50(PennTaggedHRRWordLevelNF50):
+class OneBillionTaggedHRRChunkLevelNF50(OneBillionTaggedHRRWordLevelNF50):
 
   @classmethod
   def Task(cls):
-    p = super(PennTaggedHRRChunkLevelNF50, cls).Task()
+    p = super(OneBillionTaggedHRRChunkLevelNF50, cls).Task()
     # TODO(jmluo) need to rename this -- I'm still using chunk loss but there is no r_o prediction.
-    p.train.chunk_loss_anneal = 3000.0
+    p.train.chunk_loss_anneal = 10000.0
     p.lm.use_chunks = True
     p.lm.num_sent_roles = 2
-    p.lm.sent_role_anneal = 1500.0
+    p.lm.sent_role_anneal = 10000.0
     p.lm.num_word_roles = 2
-    for tpl in p.lm.rnns.cell_tpl:
-      tpl.num_output_nodes = 2 * cls.EMBEDDING_DIM
-    
+    p.lm.rnns.cell_tpl[-1].num_output_nodes = 2 * cls.EMBEDDING_DIM
+        
     p.lm.pred_proj.input_dim = 2 * cls.EMBEDDING_DIM
     p.lm.pred_proj.output_dim = cls.EMBEDDING_DIM
     p.lm.pred_proj.activation = 'TANH'
     p.lm.pred_proj.batch_norm = False
-
     return p
 
 @model_registry.RegisterSingleTaskModel
-class PennTaggedHRRChunkLevelNF50RNN(PennTaggedHRRChunkLevelNF50):
+class OneBillionTaggedHRRChunkLevelNF50RNN(OneBillionTaggedHRRChunkLevelNF50):
   
   @classmethod
   def Task(cls):
-    p = super(PennTaggedHRRChunkLevelNF50RNN, cls).Task()
+    p = super(OneBillionTaggedHRRChunkLevelNF50RNN, cls).Task()
     p.lm.pred_mode = 'rnn'
     
-    p.lm.pred_rnn = PennTaggedHRRChunkLevelNF50RNN.get_lm_params(1, 0.5).rnns
+    p.lm.pred_rnn = OneBillionTaggedHRRChunkLevelNF50RNN.get_lm_params(1, 0.75).rnns
     
     return p
 

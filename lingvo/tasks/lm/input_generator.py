@@ -34,6 +34,7 @@ class LmInput(base_input_generator.BaseSequenceInputGenerator):
     """Defaults params for LmInput."""
     p = super(LmInput, cls).Params()
     p.Define('use_chunks', False, 'Flag to use chunks during training.')
+    p.Define('use_sst', False, 'Flag to use sst files as input source.')
     p.tokenizer = tokenizers.SimpleTokenizer.Params()
     return p
 
@@ -96,16 +97,24 @@ class LmInput(base_input_generator.BaseSequenceInputGenerator):
       self._word_count.set_shape([bs])
 
   def _DataSourceFromFilePattern(self, file_pattern):
-
-    def ReadInput(line):
-      word_count = tf.size(tf.strings.split([line]))
-      strlen = tf.size(tf.strings.split([line], ''))
-      return line, word_count, strlen
-
-    return py_x_ops.generic_input(
+    
+    if self.params.use_sst:
+      return py_x_ops.lm_text_input(
         file_pattern=file_pattern,
-        processor=ReadInput,
+        normalization='',
+        proto='string',
         **self.CommonInputOpArgs())
+    else:
+      def ReadInput(line):
+        word_count = tf.size(tf.strings.split([line]))
+        strlen = tf.size(tf.strings.split([line], ''))
+        return line, word_count, strlen
+
+      return py_x_ops.generic_input(
+          file_pattern=file_pattern,
+          processor=ReadInput,
+          **self.CommonInputOpArgs())
+    
 
   def InputBatch(self):
     ret = py_utils.NestedMap()
