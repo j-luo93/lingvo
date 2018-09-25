@@ -40,9 +40,11 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
   def Train(cls):
     p = lm_inp.LmInput.Params()
     # p.use_sst = True
-    p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
-    # p.bucket_batch_limit = [256, 128, 128, 64, 64, 32, 16, 8, 4]
-    p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
+    # p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
+    # # p.bucket_batch_limit = [256, 128, 128, 64, 64, 32, 16, 8, 4]
+    # p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
+    p.bucket_upper_bound = [10, 20, 30, 40, 50]
+    p.bucket_batch_limit = [64] * len(p.bucket_upper_bound)
     p.file_buffer_size = 10000000
     p.file_parallelism = 10
     p.file_pattern = 'text:' + os.path.join(
@@ -145,13 +147,19 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
     # TODO(ciprianchelba): tune accumulator value, learning rate, clipping
     # threshold.
     tp.learning_rate = 0.1
-    tp.lr_schedule = (
-        lr_schedule.PiecewiseConstantLearningRateSchedule.Params().Set(
-            boundaries=[], values=[1.0]))
+    # tp.lr_schedule = (
+    #     lr_schedule.PiecewiseConstantLearningRateSchedule.Params().Set(
+    #         boundaries=[], values=[1.0]))
+    p.train.lr_schedule = (
+        lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=100))
+        # lr_schedule.ExponentialLearningRateSchedule.Params().Set(start=(0, 1.0), limit=(10000, 0.01)))
+    # tp.learning_rate = 0.02
+    # p.train.optimizer = optimizer.SGD.Params()
+    p.train.lr_schedule.metric_history.local_filesystem = True
     tp.l2_regularizer_weight = None  # No regularization.
-    tp.optimizer = optimizer.Adagrad.Params()
-    tp.save_interval_seconds = 20
-    tp.summary_interval_steps = 20
+    # tp.optimizer = optimizer.Adagrad.Params()
+    tp.save_interval_seconds = 200
+    tp.summary_interval_steps = 200
     
     ######################### stuff I added to the base ########################
     num_input_dim = p.lm.softmax.input_dim
@@ -238,7 +246,7 @@ class OneBillionHRRWordLevelNF50(OneBillionBaseline):
     # annealing for second role
     p.lm.softmax.role_anneal = 10000
     # isometric loss
-    p.train.isometric = 1e4
+    p.train.isometric = 0.0#1e4
 
     return p
 
@@ -268,7 +276,7 @@ class OneBillionTaggedBaseline(OneBillionBaseline):
   def Train(cls):
     p = super(OneBillionTaggedBaseline, cls).Train()
     p.use_chunks = True
-    p.bucket_upper_bound = [b * 2 for b in [10, 20, 30, 40, 50, 100, 256, 512, 1024]]
+    p.bucket_upper_bound = [b * 2 for b in p.bucket_upper_bound ]
     return p
 
 '''
@@ -287,7 +295,7 @@ class OneBillionTaggedHRRWordLevelNF50(OneBillionHRRWordLevelNF50):
   def Train(cls):
     p = super(OneBillionTaggedHRRWordLevelNF50, cls).Train()
     p.use_chunks = True
-    p.bucket_upper_bound = [b * 2 for b in [10, 20, 30, 40, 50, 100, 256, 512, 1024]]
+    p.bucket_upper_bound = [b * 2 for b in p.bucket_upper_bound]
     return p
 
 '''
@@ -322,6 +330,9 @@ class OneBillionTaggedHRRChunkLevelNF50RNN(OneBillionTaggedHRRChunkLevelNF50):
     p.lm.pred_mode = 'rnn'
     
     p.lm.pred_rnn = OneBillionTaggedHRRChunkLevelNF50RNN.get_lm_params(1, 0.75).rnns
-    
+    p.lm.pred_rnn.dropout.keep_prob = 0.75
     return p
 
+@model_registry.RegisterSingleTaskModel
+class OneBillionTaggedHRRChunkLevelNF250RNN(OneBillionTaggedHRRChunkLevelNF50RNN):
+  NUM_FILLERS_PER_ROLE = 250

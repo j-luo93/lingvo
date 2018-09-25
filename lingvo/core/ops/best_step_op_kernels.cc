@@ -66,7 +66,7 @@ class BestStepOp : public OpKernel {
         }
       }
     } else {
-      LOG(WARNING) << "hist_file '" << &hist_file_ << "' doesn't exist.";
+      LOG(WARNING) << "hist_file '" << hist_file_ << "' doesn't exist.";
     }
 
     Tensor* res;

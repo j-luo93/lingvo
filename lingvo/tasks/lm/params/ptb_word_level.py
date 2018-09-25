@@ -30,7 +30,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
   EMBEDDING_DIM = 512
   MAX_TOKENS = 512
   NUM_EMBEDDING_SHARDS = 1
-  NUM_SAMPLED = 9999
+  NUM_SAMPLED = 0
   NUM_SOFTMAX_SHARDS = 1
   RNN_STATE_DIM = 512
   VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
@@ -39,8 +39,10 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
   @classmethod
   def Train(cls):
     p = lm_inp.LmInput.Params()
-    p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
-    p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
+    #p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
+    #p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
+    p.bucket_upper_bound = [10, 20, 30, 40, 50, 100]
+    p.bucket_batch_limit = [128] * len(p.bucket_upper_bound)
     #p.bucket_batch_limit = [64] * len(p.bucket_upper_bound) # [1024, 512, 256, 256, 128, 128, 64, 32, 16]
     p.file_buffer_size = 10000000
     p.file_parallelism = 10
@@ -135,22 +137,33 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     # Use raw loss: sum logP across tokens in a batch but average across splits.
     tp.sum_loss_across_tokens_in_batch = True
     # Disable any so called "clipping" (gradient scaling really).
-    tp.clip_gradient_norm_to_value = 0.0
-    tp.grad_norm_to_clip_to_zero = 0.0
-    # Do clip the LSTM gradients.
-    tp.max_lstm_gradient_norm = 16
-    # Straight Adagrad; very sensitive to initial accumulator value, the default
-    # 0.1 value is far from adequate.
-    # TODO(ciprianchelba): tune accumulator value, learning rate, clipping
-    # threshold.
-    tp.learning_rate = 0.1
-    tp.lr_schedule = (
-        lr_schedule.PiecewiseConstantLearningRateSchedule.Params().Set(
-            boundaries=[], values=[1.0]))
+    # tp.clip_gradient_norm_to_value = 0.0
+    # tp.grad_norm_to_clip_to_zero = 0.0
+    # # Do clip the LSTM gradients.
+    # tp.max_lstm_gradient_norm = 16
+    # # Straight Adagrad; very sensitive to initial accumulator value, the default
+    # # 0.1 value is far from adequate.
+    # # TODO(ciprianchelba): tune accumulator value, learning rate, clipping
+    # # threshold.
+    #tp.lr_schedule = (
+    #    lr_schedule.PiecewiseConstantLearningRateSchedule.Params().Set(
+    #        boundaries=[], values=[1.0]))
+    # tp.lr_schedule = (
+    #    lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=100))
+    # tp.lr_schedule.metric_history.local_filesystem = True
+
+    p.train.lr_schedule = (
+        lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=100))
+        # lr_schedule.ExponentialLearningRateSchedule.Params().Set(start=(0, 1.0), limit=(10000, 0.01)))
+    # tp.learning_rate = 0.02
+    # p.train.optimizer = optimizer.SGD.Params()
+    p.train.lr_schedule.metric_history.local_filesystem = True
+    # p.train.learning_rate = 1.0
+    
     tp.l2_regularizer_weight = None  # No regularization.
-    tp.optimizer = optimizer.Adagrad.Params()
-    tp.save_interval_seconds = 20
-    tp.summary_interval_steps = 20
+    # tp.optimizer = optimizer.Adagrad.Params()
+    #tp.save_interval_seconds = 20
+    #tp.summary_interval_steps = 20
     
     ######################### stuff I added to the base ########################
 
@@ -177,21 +190,49 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     # forget gate bias set to 1.0
     for param in p.lm.rnns.cell_tpl:
       param.forget_gate_bias = 1.0
+      # param.cell_value_cap  = 0.0
+      #param.zo_prob = 0.15
 
-    # gradient norm clipping
+    ## gradient norm clipping
     p.train.clip_gradient_norm_to_value = 5.0
     p.train.grad_norm_to_clip_to_zero = 0.0
     p.train.max_lstm_gradient_norm = 0
 
-    # Use SGD and dev-based decay learning schedule
-#     p.train.lr_schedule = (
-#         lr_schedule.DevBasedSchedule.Params().Set(decay=0.9))
-#     p.train.optimizer = optimizer.SGD.Params()
-#     p.train.learning_rate = 1.0
-#
-#     p.train.clip_gradient_norm_to_value = 5.0
-
+    p.train.save_interval_seconds = 100
+    p.train.summary_interval_steps = 100
     return p
+# 
+# @model_registry.RegisterSingleTaskModel
+# class PennBaselineSGD(PennBaseline):
+# 
+#     @classmethod
+#     def Task(cls):
+#         p = super(PennBaseline, cls).Task()
+#         # Use SGD and dev-based decay learning schedule
+#         p.train.lr_schedule = (
+#             lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=100))
+#         p.train.optimizer = optimizer.SGD.Params()
+#         p.train.lr_schedule.metric_history.local_filesystem = True
+#         p.train.learning_rate = 1.0
+# 
+#         p.train.clip_gradient_norm_to_value = 10.0
+# 
+#         return p
+
+@model_registry.RegisterSingleTaskModel
+class PennBaselineNoSum(PennBaseline):
+
+  @classmethod
+  def Task(cls):
+    p = super(PennBaselineNoSum, cls).Task()
+    p.train.sum_loss_across_tokens_in_batch = False
+    return p
+
+@model_registry.RegisterSingleTaskModel
+class PennBaselineD650(PennBaseline):
+    
+    EMBEDDING_DIM = 650
+    RNN_STATE_DIM = 650
 
 '''
 Word level HRR, with num_fillers = 50
@@ -225,7 +266,7 @@ class PennHRRWordLevelNF50(PennBaseline):
     # annealing for second role
     p.lm.softmax.role_anneal = 3000
     # isometric loss
-    p.train.isometric = 1e4
+    p.train.isometric = 0.0#1e4
 
     return p
 
@@ -249,27 +290,27 @@ class PennTaggedBaseline(PennBaseline):
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/ptb-chunk')
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
-  NUM_SAMPLED = 6335
-  VOCAB_SIZE = 6336  # includes <epsilon>, vocabulary in fst symtable format
+  NUM_SAMPLED = 9999
+  VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
 
   @classmethod
   def Train(cls):
     p = super(PennTaggedBaseline, cls).Train()
     p.use_chunks = True
-    p.bucket_upper_bound = [b * 2 for b in [10, 20, 30, 40, 50, 100, 256, 512, 1024]]
+    p.bucket_upper_bound = [b * 2 for b in p.bucket_upper_bound ]
     return p
 
-  @classmethod
-  def Dev(cls):
-    p = super(PennTaggedBaseline, cls).Dev()
-    p.num_samples = 1006
-    return p
-
-  @classmethod
-  def Test(cls):
-    p = super(PennTaggedBaseline, cls).Test()
-    p.num_samples = 1006
-    return p
+#  @classmethod
+#  def Dev(cls):
+#    p = super(PennTaggedBaseline, cls).Dev()
+#    p.num_samples = 1006
+#    return p
+#
+#  @classmethod
+#  def Test(cls):
+#    p = super(PennTaggedBaseline, cls).Test()
+#    p.num_samples = 1006
+#    return p
 
 '''
 word-level HRR on chunk data
@@ -280,28 +321,28 @@ class PennTaggedHRRWordLevelNF50(PennHRRWordLevelNF50):
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/ptb-chunk')
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
-  NUM_SAMPLED = 6335
-  VOCAB_SIZE = 6336  # includes <epsilon>, vocabulary in fst symtable format
+  NUM_SAMPLED = 9999
+  VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
 
 
   @classmethod
   def Train(cls):
     p = super(PennTaggedHRRWordLevelNF50, cls).Train()
     p.use_chunks = True
-    p.bucket_upper_bound = [b * 2 for b in [10, 20, 30, 40, 50, 100, 256, 512, 1024]]
+    p.bucket_upper_bound = [b * 2 for b in p.bucket_upper_bound ]
     return p
 
-  @classmethod
-  def Dev(cls):
-    p = super(PennTaggedHRRWordLevelNF50, cls).Dev()
-    p.num_samples = 1006
-    return p
-
-  @classmethod
-  def Test(cls):
-    p = super(PennTaggedHRRWordLevelNF50, cls).Test()
-    p.num_samples = 1006
-    return p
+#  @classmethod
+#  def Dev(cls):
+#    p = super(PennTaggedHRRWordLevelNF50, cls).Dev()
+#    p.num_samples = 1006
+#    return p
+#
+#  @classmethod
+#  def Test(cls):
+#    p = super(PennTaggedHRRWordLevelNF50, cls).Test()
+#    p.num_samples = 1006
+#    return p
 
 '''
 Full model. Chunk-level HRR. 
@@ -316,7 +357,7 @@ class PennTaggedHRRChunkLevelNF50(PennTaggedHRRWordLevelNF50):
     p.train.chunk_loss_anneal = 3000.0
     p.lm.use_chunks = True
     p.lm.num_sent_roles = 2
-    p.lm.sent_role_anneal = 1500.0
+    p.lm.sent_role_anneal = 3000.0
     p.lm.num_word_roles = 2
     for tpl in p.lm.rnns.cell_tpl:
       tpl.num_output_nodes = 2 * cls.EMBEDDING_DIM
@@ -337,6 +378,9 @@ class PennTaggedHRRChunkLevelNF50RNN(PennTaggedHRRChunkLevelNF50):
     p.lm.pred_mode = 'rnn'
     
     p.lm.pred_rnn = PennTaggedHRRChunkLevelNF50RNN.get_lm_params(1, 0.5).rnns
-    
+    p.lm.pred_rnn.dropout.keep_prob = 0.5
     return p
 
+@model_registry.RegisterSingleTaskModel
+class PennTaggedHRRChunkLevelNF250RNN(PennTaggedHRRChunkLevelNF50):
+  NUM_FILLERS_PER_ROLE = 250

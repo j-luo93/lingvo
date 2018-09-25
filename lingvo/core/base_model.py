@@ -320,6 +320,7 @@ class BaseTask(base_layer.LayerBase):
     metrics['num_samples_in_batch'] = (tf.convert_to_tensor(
         self.input_generator.InputBatchSize()), tf.constant(1.0))
     # Generates summaries.
+    self.AdjustEvalMetrics(metrics)
     for name, (value, weight) in six.iteritems(metrics):
       self.AddEvalMetric(name, value, weight)
 
@@ -329,6 +330,9 @@ class BaseTask(base_layer.LayerBase):
 
     return metrics
 
+  def AdjustEvalMetrics(self, metrics):
+    pass
+    
   def FPropDefaultTheta(self):
     """Calls FProp."""
     return self.FProp(self.theta)

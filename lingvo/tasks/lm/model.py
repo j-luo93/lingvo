@@ -180,22 +180,47 @@ class LanguageModel(base_model.BaseTask):
         'num_predictions': (num_preds, 1),
         'num_words': (num_words, 1)
     }
-    tmp_loss = loss# + theta.dummy * theta.dummy
+    #tmp_loss = loss# + theta.dummy * theta.dummy
     if 'isometric_loss' in locals():
-      tmp_loss += isometric_loss
+      #tmp_loss += isometric_loss
       metrics['isometric'] = (isometric_loss, 1)
     if 'chunk_loss' in locals():
-      tmp_loss += chunk_loss
+      #tmp_loss += chunk_loss
       metrics['chunk_loss'] = (chunk_loss, 1)
       metrics['annealed_total_chunk_loss'] = (annealed_total_chunk_loss, 1)
       metrics['annealed_avg_chunk_loss'] = (annealed_avg_chunk_loss, xent_output.num_chunks)
       metrics['total_chunk_loss'] = (total_chunk_loss, 1)
       metrics['avg_chunk_loss'] = (avg_chunk_loss, xent_output.num_chunks)
       metrics['num_chunks'] = (xent_output.num_chunks, 1)
-    metrics['loss'] = (tmp_loss, num_preds)
+    #metrics['loss'] = (tmp_loss, num_preds)
+    if p.train.sum_loss_across_tokens_in_batch:
+        metrics['loss'] = (loss, 1)
+    else:
+        metrics['loss'] = (loss, num_preds)
+    metrics['batch_size'] = (tf.cast(batch_size, tf.float32), 1)
 
     return metrics
 
+  def AdjustEvalMetrics(self, metrics):
+    with tf.name_scope('aggregate_loss'):
+      if self.params.train.sum_loss_across_tokens_in_batch:
+        loss, w = metrics['loss']
+        loss = loss / metrics['batch_size'][0] 
+        metrics['loss'] = (loss, w)
+
+    return metrics
+
+  def FProp(self, theta):
+    metrics = super(LanguageModel, self).FProp(theta)
+    if 'isometric' in metrics:
+      self._loss = self._loss + metrics['isometric'][0]
+    if 'chunk_loss' in metrics:
+      if self.params.train.sum_loss_across_tokens_in_batch:
+        self._loss = self._loss + metrics['annealed_total_chunk_loss'][0] / metrics['batch_size'][0]
+      else:
+        self._loss = self._loss + metrics['annealed_avg_chunk_loss'][0] 
+    return metrics      
+    
 
   def AdjustGradients(self, var_grad):
     """Clip LSTM gradients.

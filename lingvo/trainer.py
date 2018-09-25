@@ -1014,17 +1014,17 @@ class RunnerManager(object):
 
     FLAGS.evaler_job = '/job:local'
     FLAGS.evaler_replicas = 1
-    if FLAGS.run_locally == 'gpu':
-      FLAGS.evaler_gpus = 1
-    else:
-      FLAGS.evaler_gpus = 0
+    # if FLAGS.run_locally == 'gpu':
+    #   FLAGS.evaler_gpus = 1
+    # else:
+    #   FLAGS.evaler_gpus = 0
 
     FLAGS.decoder_job = '/job:local'
     FLAGS.decoder_replicas = 1
-    if FLAGS.run_locally == 'gpu':
-      FLAGS.decoder_gpus = 1
-    else:
-      FLAGS.decoder_gpus = 0
+    # if FLAGS.run_locally == 'gpu':
+    #   FLAGS.decoder_gpus = 1
+    # else:
+    #   FLAGS.decoder_gpus = 0
 
 
 def InspectModel():
@@ -1109,3 +1109,4 @@ def main(unused_argv):
 
 if __name__ == '__main__':
   tf.app.run(main)
+        
