@@ -792,7 +792,7 @@ def CreateVariable(name,
   if shape:
     assert all([dim_size > 0 for dim_size in shape]), ('%s' % shape)
     dim0 = shape[0]
-  assert p.init.scale >= 0 or p.init.method == 'constant'
+  assert p.init.method == 'constant' or p.init.scale >= 0
   method = p.init.method
   scale = p.init.scale
   seed = p.init.seed

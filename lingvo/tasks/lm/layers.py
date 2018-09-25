@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import math
 
+import numpy as np
 from six.moves import range
 from six.moves import zip
 import tensorflow as tf
@@ -30,6 +31,16 @@ from lingvo.core import py_utils
 from lingvo.core import rnn_cell
 from lingvo.core import rnn_layers
 
+
+def get_basis_init(p, shape):
+  if p.trainable_basis:
+    return p.params_init
+  else:
+    init_val = np.random.normal(size=shape, 
+          scale=1.0 / math.sqrt(shape[-1]))
+    init = py_utils.WeightInit.Constant(scale=init_val)
+    return init
+    
 
 class BaseLanguageModel(base_layer.LayerBase):
   """Abstract base class for a language model layer."""
@@ -208,6 +219,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
     p.Define('sent_role_anneal', 0.0, 'Anneal to 1.0 until this step.')
     p.Define('use_chunks', False, 'Whether to include chunk loss')
     p.Define('pred_mode', 'trigram', 'Prediction mode')
+    p.Define('trainable_basis', True, 'trainable basis embeddings')
     return p
 
   @base_layer.initializer
@@ -281,16 +293,13 @@ class RnnLmNoEmbedding(BaseLanguageModel):
           collections=[self.__class__.__name__ + '_vars'])
         self.CreateVariable('A', A_pc)
 
-        R_init_val = tf.random_normal(shape=[p.num_sent_roles, input_dim],
-              stddev=0.044,
-              dtype=tf.float32)
-        R_init = py_utils.WeightInit.Constant(scale=R_init_val)
+        R_shape = [p.num_sent_roles, p.rnns.cell_tpl[0].num_input_nodes]
         R_pc = py_utils.WeightParams(
-            shape=[p.num_sent_roles, p.rnns.cell_tpl[0].num_input_nodes], # HACK
-            init=p.params_init,
+            shape=R_shape, # HACK
+            init=get_basis_init(p, R_shape),
             dtype=p.dtype,
             collections=[self.__class__.__name__ + '_vars'])
-        self.CreateVariable('R', R_pc, trainable=False)
+        self.CreateVariable('R', R_pc, trainable=p.trainable_basis)
 
   def zero_state(self, batch_size):
     return self.rnns.zero_state(batch_size)
@@ -1335,8 +1344,6 @@ class TransformerLm(TransformerLmNoEmbedding):
     return super(TransformerLm, self).FProp(
         theta, activation, paddings, labels=labels)
 
-
-
 class HRREmbeddingLayer(base_layer.LayerBase):
   """HRR embedding layer"""
 
@@ -1358,6 +1365,7 @@ class HRREmbeddingLayer(base_layer.LayerBase):
     # TODO(jmluo)
     p.Define('vocab_size', 0, 'Vocabulary size')
     p.Define('actual_shards', -1, 'Actual number of shards used. This should not be specified, but computed during __init__ call')
+    p.Define('trainable_basis', True, 'trainable basis embeddings')
     return p
 
   @base_layer.initializer
@@ -1374,16 +1382,18 @@ class HRREmbeddingLayer(base_layer.LayerBase):
     assert p.mode in ['basic', 'rs', 'dec_only']
     if p.merge:
       assert p.mode == 'rs', 'Other modes not supported yet'
-
+    
+    r_shape = [p.num_roles, p.embedding_dim]
     r_pc = py_utils.WeightParams(
-        shape=[p.num_roles, p.embedding_dim],
-        init=p.params_init,
+        shape=r_shape,
+        init=get_basis_init(p, r_shape),
         dtype=p.dtype,
         collections=[self.__class__.__name__ + '_vars'])
-
+      
+    F_shape = [p.num_roles, p.num_fillers_per_role, p.embedding_dim]
     F_pc = py_utils.WeightParams(
-        shape=[p.num_roles, p.num_fillers_per_role, p.embedding_dim],
-        init=p.params_init,
+        shape=F_shape,
+        init=get_basis_init(p, F_shape),
         dtype=p.dtype,
         collections=[self.__class__.__name__ + '_vars'])
 
@@ -1412,8 +1422,8 @@ class HRREmbeddingLayer(base_layer.LayerBase):
         self.CreateVariable('F', F_pc)
       elif p.mode == 'basic':
         self.CreateChild('s', p.s)
-        self.CreateVariable('r', r_pc)
-        self.CreateVariable('F', F_pc)
+        self.CreateVariable('r', r_pc, trainable=p.trainable_basis)
+        self.CreateVariable('F', F_pc, trainable=p.trainable_basis)
       else:
         self.CreateChild('e_l', p.e_l)
         self.CreateVariable('r', r_pc)

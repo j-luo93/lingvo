@@ -194,7 +194,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
       #param.zo_prob = 0.15
 
     ## gradient norm clipping
-    p.train.clip_gradient_norm_to_value = 5.0
+    p.train.clip_gradient_norm_to_value = 10.0
     p.train.grad_norm_to_clip_to_zero = 0.0
     p.train.max_lstm_gradient_norm = 0
 
@@ -266,7 +266,7 @@ class PennHRRWordLevelNF50(PennBaseline):
     # annealing for second role
     p.lm.softmax.role_anneal = 3000
     # isometric loss
-    p.train.isometric = 0.0#1e4
+    p.train.isometric = 1e2
 
     return p
 
@@ -279,6 +279,17 @@ class PennHRRWordLevelNF100(PennHRRWordLevelNF50):
 class PennHRRWordLevelNF250(PennHRRWordLevelNF50): 
 
   NUM_FILLERS_PER_ROLE = 250
+
+@model_registry.RegisterSingleTaskModel
+class PennHRRWordLevelNF250FixedBases(PennHRRWordLevelNF250): 
+
+  @classmethod
+  def Task(cls):
+    p = super(PennHRRWordLevelNF250FixedBases, cls).Task()  
+    p.lm.emb.trainable_basis = False
+    p.train.isometric = 0.
+    return p
+
 
 
 '''
@@ -384,3 +395,14 @@ class PennTaggedHRRChunkLevelNF50RNN(PennTaggedHRRChunkLevelNF50):
 @model_registry.RegisterSingleTaskModel
 class PennTaggedHRRChunkLevelNF250RNN(PennTaggedHRRChunkLevelNF50):
   NUM_FILLERS_PER_ROLE = 250
+
+@model_registry.RegisterSingleTaskModel
+class PennTaggedHRRChunkLevelNF250RNNFixedBases(PennTaggedHRRChunkLevelNF250RNN):
+
+  @classmethod
+  def Task(cls):
+    p = super(PennTaggedHRRChunkLevelNF250RNNFixedBases, cls).Task()
+    p.lm.emb.trainable_basis = False
+    p.lm.trainable_basis = False
+    p.train.isometric = 0.
+    return p

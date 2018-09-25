@@ -120,7 +120,7 @@ class LanguageModel(base_model.BaseTask):
           F2d = tf.reshape(F_wm, [nr * nf, d])
           diff = tf.matmul(F2d, tf.transpose(F2d)) - tf.eye(nr * nf)
           # diff = tf.matmul(F_wm, tf.transpose(F_wm, perm=[0, 2, 1])) - tf.eye(nf)
-          isometric_constraint += tf.reduce_sum(diff**2) / 2.0
+          isometric_constraint += tf.reduce_sum(diff**2) 
         if 'A' in theta.lm:
           d = theta.lm.A.get_shape().as_list()[0]
           A = tf.reshape(theta.lm.A, [d, 2, d])

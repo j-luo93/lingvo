@@ -200,7 +200,7 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
       param.forget_gate_bias = 1.0
 
     # gradient norm clipping
-    p.train.clip_gradient_norm_to_value = 5.0
+    p.train.clip_gradient_norm_to_value = 10.0
     p.train.grad_norm_to_clip_to_zero = 0.0
     p.train.max_lstm_gradient_norm = 0
 
@@ -246,7 +246,7 @@ class OneBillionHRRWordLevelNF50(OneBillionBaseline):
     # annealing for second role
     p.lm.softmax.role_anneal = 10000
     # isometric loss
-    p.train.isometric = 0.0#1e4
+    p.train.isometric = 1e2
 
     return p
 
@@ -259,6 +259,17 @@ class OneBillionHRRWordLevelNF100(OneBillionHRRWordLevelNF50):
 class OneBillionHRRWordLevelNF250(OneBillionHRRWordLevelNF50): 
 
   NUM_FILLERS_PER_ROLE = 250
+
+
+@model_registry.RegisterSingleTaskModel
+class OneBillionHRRWordLevelNF250FixedBases(OneBillionHRRWordLevelNF250): 
+  
+  @classmethod
+  def Task(cls):
+    p = super(OneBillionHRRWordLevelNF250FixedBases, cls).Task()  
+    p.lm.emb.trainable_basis = False
+    p.train.isometric = 0.
+    return p
 
 
 '''
@@ -336,3 +347,15 @@ class OneBillionTaggedHRRChunkLevelNF50RNN(OneBillionTaggedHRRChunkLevelNF50):
 @model_registry.RegisterSingleTaskModel
 class OneBillionTaggedHRRChunkLevelNF250RNN(OneBillionTaggedHRRChunkLevelNF50RNN):
   NUM_FILLERS_PER_ROLE = 250
+  
+
+@model_registry.RegisterSingleTaskModel
+class OneBillionTaggedHRRChunkLevelNF250RNNFixedBases(OneBillionTaggedHRRChunkLevelNF250RNN):
+
+  @classmethod
+  def Task(cls):
+    p = super(OneBillionTaggedHRRChunkLevelNF250RNNFixedBases, cls).Task()
+    p.lm.emb.trainable_basis = False
+    p.lm.trainable_basis = False
+    p.train.isometric = 0.
+    return p
