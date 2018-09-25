@@ -216,7 +216,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
     p.Define('decoded_filler_keep_prob', 1.0, 'Keep prob for the decoded (noisy) filler embedding')
     p.Define('num_word_roles', 0, 'Number of roles on word level')
     p.Define('num_sent_roles', 0, 'Number of top/sentence level roles')
-    p.Define('sent_role_anneal', 0.0, 'Anneal to 1.0 until this step.')
+    p.Define('sent_role_anneal_steps', None, 'Anneal to 1.0 until this step.')
     p.Define('use_chunks', False, 'Whether to include chunk loss')
     p.Define('pred_mode', 'trigram', 'Prediction mode')
     p.Define('trainable_basis', True, 'trainable basis embeddings')
@@ -252,6 +252,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
       self.CreateChild('softmax', p.softmax)
       
       if p.use_chunks:
+        assert p.num_sent_roles == len(p.sent_role_anneal_steps) + 1, 'provide anneal steps for all roles!'
         sp = layers.SimpleFullSoftmax.Params()
         sp.name = 'lower_softmax'
         sp.num_classes = p.num_sent_roles
@@ -611,30 +612,29 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             f_chunk = HRREmbeddingLayer.static_circular_corr(theta.R, tf.expand_dims(h_chunk, axis=-2)) # size: bs x cl x 2 x d
             last_pred = tf.reshape(tf.gather_nd(f_chunk, last_pred_pos_indices),  [batch, 1, p.num_sent_roles, -1]) 
             f_chunk = tf.concat([f_chunk[:, :-1], last_pred], axis=1)
-            f_hat1, f_hat2 = tf.unstack(f_chunk, axis=-2)
+            f_hats = tf.unstack(f_chunk, axis=-2)
             inter_res.h_chunk = h_chunk
             inter_res.f_chunk = f_chunk
-            inter_res.f_hat1 = f_hat1
-            inter_res.f_hat2 = f_hat2
+            inter_res.f_hats = f_hats
             
 
             # gold1, gold2 = tf.unstack(target_chunk_emb, axis=1)
-            gold1, gold2 = target_chunk_emb
+            gold_embs = target_chunk_emb
             # if p.pred_mode == 'rnn':
             #   merged_indices = tf.transpose(tf.reshape(tf.range(batch * clen), [batch, -1]), perm=[1, 0]) # cl x bs
             # else:
             merged_indices = tf.reshape(tf.range(batch * clen), [batch, -1])
-            dot1 = mm3by2(f_hat1, tf.reshape(gold1, [batch * clen, -1]), transpose=True) # bs x cl x bs*cl / cl x bs x bs*cl (using rnn)
-            dot2 = mm3by2(f_hat2, tf.reshape(gold2, [batch * clen, -1]), transpose=True) # bs x cl x bs*cl
+            dots = [mm3by2(f_hat, tf.reshape(gold_emb, [batch * clen, -1]), transpose=True) for f_hat, gold_emb in zip(f_hats, gold_embs)]
+            # dot1 = mm3by2(f_hat1, tf.reshape(gold1, [batch * clen, -1]), transpose=True) # bs x cl x bs*cl / cl x bs x bs*cl (using rnn)
+            # dot2 = mm3by2(f_hat2, tf.reshape(gold2, [batch * clen, -1]), transpose=True) # bs x cl x bs*cl
             global_step = tf.to_float(py_utils.GetOrCreateGlobalStep())
-            temperature = tf.minimum(tf.constant(p.sent_role_anneal), global_step) / p.sent_role_anneal
-            tf.summary.scalar('temperature', temperature)
-            den_dot = dot1 + dot2 * temperature
+            temperatures = [tf.minimum(tf.constant(sras), global_step) / sras for sras in p.sent_role_anneal_steps]
+            for i, t in enumerate(temperatures):
+              tf.summary.scalar('temperature_sent_role_%d' %i, t)
+            den_dot = sum([dots[0]] + [dot * temperature for dot, temperature in zip(dots[1:], temperatures)])
 
-            inter_res.gold1 = gold1
-            inter_res.gold2 = gold2
-            inter_res.dot1 = dot1
-            inter_res.dot2 = dot2
+            inter_res.gold_embs = gold_embs
+            inter_res.dots = dots
             inter_res.dot = den_dot
 
             with tf.name_scope('chunk_loss'):
@@ -823,7 +823,7 @@ class RnnLm(RnnLmNoEmbedding):
       assert p.tie
 
     if p.emb.cls == HRREmbeddingLayer:
-      activation, signature, emb_weights = self.emb.EmbLookup(theta.emb, ids, role_anneal=p.softmax.role_anneal)
+      activation, signature, emb_weights = self.emb.EmbLookup(theta.emb, ids)
     else:
       activation = self.emb.EmbLookup(theta.emb, ids)
       emb_weights = None

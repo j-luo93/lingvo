@@ -1518,7 +1518,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
         ' divide num_classes.')
     p.Define('tie', False, 'Use tied embedding')
     p.Define('num_roles', 0, 'Number of roles used for HRR')
-    p.Define('role_anneal', False, 'Use annealing for roles to break the symmetry')
+    p.Define('role_anneal_steps', None, 'Use annealing for roles to break the symmetry')
     return p
 
   @base_layer.initializer
@@ -1552,6 +1552,8 @@ class SimpleFullSoftmax(SoftmaxLayer):
           self.CreateVariable('weight_%d' % i, pc, self.AddGlobalVN)
       
       multiplier = max(1, p.num_roles)
+      if p.num_roles > 1:
+        assert len(p.role_anneal_steps) + 1 == p.num_roles, 'provide anneal steps for word roles!'
       pc.shape = [num_classes_per_shard * multiplier]
       pc.init.method = 'constant'
       pc.init.scale = 0.0
@@ -1602,7 +1604,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
     # x * w + b
     # Note that theta.wm and theta.bias are transformed to concated/clipped
     # by caller.
-    if p.role_anneal > 0:
+    if p.role_anneal_steps:
       assert activation is not None
       xws = list()
       for role_ind in xrange(p.num_roles):
@@ -1625,7 +1627,7 @@ class SimpleFullSoftmax(SoftmaxLayer):
 
   def _GetGatingProbs(self, theta, activation):
     p = self.params
-    assert p.role_anneal > 0
+    assert p.role_anneal_steps
     
     last_dim = tf.shape(activation)[-1]
     inp = tf.reshape(activation, [-1, last_dim])
@@ -1634,9 +1636,10 @@ class SimpleFullSoftmax(SoftmaxLayer):
     preceding_shape = tf.shape(inp)[:-1]
     prob_1 = tf.ones(shape=preceding_shape)
     global_step = tf.to_float(py_utils.GetOrCreateGlobalStep())
-    temperature = tf.minimum(tf.constant(p.role_anneal * 1.0), global_step) / (p.role_anneal * 1.0)
-    tf.summary.scalar('temperature', temperature)
-    probs = tf.stack([prob_1, prob_1 * temperature], axis=-1)
+    temperatures = [tf.minimum(tf.constant(ras * 1.0), global_step) / (ras * 1.0) for ras in p.role_anneal_steps]
+    for i, t in enumerate(temperatures):
+      tf.summary.scalar('temperature_word_role_%d' %i, t)
+    probs = tf.stack([prob_1] + [prob_1 * t for t in temperatures], axis=-1)
     return probs
 
   def Logits(self, theta, inputs, activation=None):

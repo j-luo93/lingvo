@@ -264,7 +264,7 @@ class PennHRRWordLevelNF50(PennBaseline):
     # dropout for f_noisy
     p.lm.decoded_filler_keep_prob = 0.5
     # annealing for second role
-    p.lm.softmax.role_anneal = 3000
+    p.lm.softmax.role_anneal_steps = [3000]
     # isometric loss
     p.train.isometric = 1e2
 
@@ -290,6 +290,16 @@ class PennHRRWordLevelNF250FixedBases(PennHRRWordLevelNF250):
     p.train.isometric = 0.
     return p
 
+@model_registry.RegisterSingleTaskModel
+class PennHRRWordLevelNR4NF125FixedBases(PennHRRWordLevelNF250FixedBases):
+  NUM_FILLERS_PER_ROLE = 125
+  NUM_ROLES = 4
+  
+  @classmethod
+  def Task(cls):
+    p = super(PennHRRWordLevelNR4NF125FixedBases, cls).Task()
+    p.lm.softmax.role_anneal_steps = [3000, 4000, 5000]
+    return p
 
 
 '''
@@ -368,8 +378,8 @@ class PennTaggedHRRChunkLevelNF50(PennTaggedHRRWordLevelNF50):
     p.train.chunk_loss_anneal = 3000.0
     p.lm.use_chunks = True
     p.lm.num_sent_roles = 2
-    p.lm.sent_role_anneal = 3000.0
-    p.lm.num_word_roles = 2
+    p.lm.sent_role_anneal_steps = [3000.0]
+    p.lm.num_word_roles = cls.NUM_ROLES
     for tpl in p.lm.rnns.cell_tpl:
       tpl.num_output_nodes = 2 * cls.EMBEDDING_DIM
     
@@ -405,4 +415,16 @@ class PennTaggedHRRChunkLevelNF250RNNFixedBases(PennTaggedHRRChunkLevelNF250RNN)
     p.lm.emb.trainable_basis = False
     p.lm.trainable_basis = False
     p.train.isometric = 0.
+    return p
+    
+
+@model_registry.RegisterSingleTaskModel
+class PennTaggedHRRChunkLevelNR4NF125RNNFixedBases(PennTaggedHRRChunkLevelNF250RNNFixedBases):
+  NUM_FILLERS_PER_ROLE = 125
+  NUM_ROLES = 4
+  
+  @classmethod
+  def Task(cls):
+    p = super(PennTaggedHRRChunkLevelNR4NF125RNNFixedBases, cls).Task()
+    p.lm.softmax.role_anneal_steps = [3000, 4000, 5000]
     return p

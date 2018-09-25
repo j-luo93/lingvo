@@ -244,7 +244,7 @@ class OneBillionHRRWordLevelNF50(OneBillionBaseline):
     # dropout for f_noisy
     p.lm.decoded_filler_keep_prob = 0.75
     # annealing for second role
-    p.lm.softmax.role_anneal = 10000
+    p.lm.softmax.role_anneal_steps = [10000]
     # isometric loss
     p.train.isometric = 1e2
 
@@ -271,7 +271,17 @@ class OneBillionHRRWordLevelNF250FixedBases(OneBillionHRRWordLevelNF250):
     p.train.isometric = 0.
     return p
 
-
+@model_registry.RegisterSingleTaskModel
+class OneBillionHRRWordLevelNR4NF125FixedBases(OneBillionHRRWordLevelNF250FixedBases):
+  NUM_FILLERS_PER_ROLE = 125
+  NUM_ROLES = 4
+  
+  @classmethod
+  def Task(cls):
+    p = super(OneBillionHRRWordLevelNR4NF125FixedBases, cls).Task()
+    p.lm.softmax.role_anneal_steps = [10000, 15000, 20000]
+    return p
+    
 '''
 One Billion Words baseline with tied embeddings on tagged data (chunks).
 '''
@@ -322,8 +332,8 @@ class OneBillionTaggedHRRChunkLevelNF50(OneBillionTaggedHRRWordLevelNF50):
     p.train.chunk_loss_anneal = 10000.0
     p.lm.use_chunks = True
     p.lm.num_sent_roles = 2
-    p.lm.sent_role_anneal = 10000.0
-    p.lm.num_word_roles = 2
+    p.lm.sent_role_anneal_steps = [10000.0]
+    p.lm.num_word_roles = cls.NUM_ROLES
     p.lm.rnns.cell_tpl[-1].num_output_nodes = 2 * cls.EMBEDDING_DIM
         
     p.lm.pred_proj.input_dim = 2 * cls.EMBEDDING_DIM
@@ -358,4 +368,15 @@ class OneBillionTaggedHRRChunkLevelNF250RNNFixedBases(OneBillionTaggedHRRChunkLe
     p.lm.emb.trainable_basis = False
     p.lm.trainable_basis = False
     p.train.isometric = 0.
+    return p
+
+@model_registry.RegisterSingleTaskModel
+class OneBillionTaggedHRRChunkLevelNR4NF125RNNFixedBases(OneBillionTaggedHRRChunkLevelNF250RNNFixedBases):
+  NUM_FILLERS_PER_ROLE = 125
+  NUM_ROLES = 4
+  
+  @classmethod
+  def Task(cls):
+    p = super(OneBillionTaggedHRRChunkLevelNR4NF125RNNFixedBases, cls).Task()
+    p.lm.softmax.role_anneal_steps = [10000, 15000, 20000]
     return p
