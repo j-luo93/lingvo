@@ -72,7 +72,8 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
         cls.CORPUS_DIR, 'dev.txt')
     p.name = 'ptb_dev_set'
     p.num_batcher_threads = 1
-    p.num_samples = 3370  # Number of sentences to evaluate on.
+    # CE-HACK
+    p.num_samples = 2322#3370  # Number of sentences to evaluate on.
     return p
 
   @classmethod

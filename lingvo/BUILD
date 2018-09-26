@@ -157,3 +157,11 @@ py_test(
         "//lingvo/tasks/image/params:mnist",
     ],
 )
+
+py_binary(
+    name = "test",
+    srcs = ["test.py"],
+    deps = [":trainer_lib",
+	    "//lingvo/core/ops:py_x_ops",],
+)
+

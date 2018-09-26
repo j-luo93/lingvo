@@ -155,6 +155,8 @@ class LanguageModel(base_model.BaseTask):
           tf.summary.histogram('rs', tf.stack(rs_all))
         isometric_loss = isometric_constraint * p.train.isometric
 
+    xent_output.input_batch = input_batch
+    self.inter_res = xent_output
     if p.lm.use_chunks:# and not p.is_eval:
       with tf.name_scope('global_decode'):
         assert p.lm.num_sent_roles > 0

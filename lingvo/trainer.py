@@ -204,6 +204,7 @@ class Controller(base_runner.BaseRunner):
       gsteps = self._model.global_step
       examples = self._model.total_examples
 
+
       if FLAGS.interactive:
         # Into interactive debugging mode.
         _StartShell(locals())
@@ -521,6 +522,8 @@ class Evaler(base_runner.BaseRunner):
       path = None
       while True:
         path = self._FindNewCheckpoint(path, sess)
+        # CE-HACK
+        path = '/tmp/lingvo/train/NT-mn10.0/train/ckpt-00009814'
         if not path or self._EvalOnce(path, sess):
           break
 
@@ -533,6 +536,8 @@ class Evaler(base_runner.BaseRunner):
       # This initializes local tables
       sess.run(self.initialize_tables)
       path = tf.train.latest_checkpoint(self._train_dir)
+      # CE-HACK
+      path = '/tmp/lingvo/train/NT-mn10.0/ckpt-00009814'
       if not path:
         tf.logging.info('No checkpoint available.')
         return
@@ -548,29 +553,43 @@ class Evaler(base_runner.BaseRunner):
     Returns:
       should_stop.
     """
-    if not FLAGS.evaler_in_same_address_as_controller:
-      self._LoadCheckpointForEval(sess, path)
+    # CE-HACK
+    #if not FLAGS.evaler_in_same_address_as_controller:
+    self._LoadCheckpointForEval(sess, path)
 
+    # CE-HACK
     global_step = sess.run(self._model.global_step)
     metrics_dict = {
         name: metrics.AverageMetric() for name in self._model_task.eval_metrics
     }
     num_samples_metric = metrics_dict['num_samples_in_batch']
+    # CE-HACK
+    import cPickle
+    f_hack = open('hack_eval', 'wb')
     while (num_samples_metric.total_value <
            self._model_task.params.eval.samples_per_summary):
       if self._summary_op is None:
         # No summaries were collected.
-        ans = sess.run(self._model_task.eval_metrics)
+        # CE-HACK
+        #ans = sess.run(self._model_task.eval_metrics)
+        dump, ans = sess.run([self._model_task.inter_res, self._model_task.eval_metrics])
+        cPickle.dump(dump.input_batch.labels, f_hack)
+        cPickle.dump(dump.inter_res.chunk_ids, f_hack)
+        cPickle.dump(dump.inter_res.cce, f_hack)
       else:
         ans, summary = sess.run(
             [self._model_task.eval_metrics, self._summary_op])
         self._summary_writer.add_summary(summary, global_step)
+      # CE-HACK
       for name, (value, weight) in six.iteritems(ans):
         metrics_dict[name].Update(value, weight)
       tf.logging.info('Total examples done: %d/%d',
                       num_samples_metric.total_value,
                       self._model_task.params.eval.samples_per_summary)
 
+    # CE-HACK
+    f_hack.close()
+    1/ 0
     # Replace average values with total values for certain metrics.
     if 'num_predictions' in metrics_dict:
       metrics_dict['num_predictions'].total_weight = 1.0

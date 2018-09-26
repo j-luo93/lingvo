@@ -44,7 +44,7 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
     # # p.bucket_batch_limit = [256, 128, 128, 64, 64, 32, 16, 8, 4]
     # p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
     p.bucket_upper_bound = [10, 20, 30, 40, 50]
-    p.bucket_batch_limit = [64] * len(p.bucket_upper_bound)
+    p.bucket_batch_limit = [1] * len(p.bucket_upper_bound)
     p.file_buffer_size = 10000000
     p.file_parallelism = 10
     p.file_pattern = 'text:' + os.path.join(
