@@ -257,6 +257,7 @@ class PennHRRWordLevelNF50(PennBaseline):
     hrr.num_roles = cls.NUM_ROLES
     hrr.num_fillers_per_role = cls.NUM_FILLERS_PER_ROLE
     hrr.s.embedding_dim = cls.NUM_FILLERS_PER_ROLE * cls.NUM_ROLES
+    hrr.lazy = True
     p.lm.emb = hrr
     p.lm.num_word_roles = cls.NUM_ROLES
     p.lm.softmax.num_roles = cls.NUM_ROLES

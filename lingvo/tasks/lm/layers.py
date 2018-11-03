@@ -463,7 +463,8 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             inputs=act,
             class_weights=labels.class_weights,
             class_ids=labels.class_ids,
-            activation=h)
+            activation=h,
+            emb_weights=emb_weights)
       else:
         assert 'class_probabilities' in labels
         xent_output = softmax_layer.FProp(
@@ -832,7 +833,7 @@ class RnnLm(RnnLmNoEmbedding):
       try:
         num_shards = len(theta.emb.wm)
       except:
-        num_shards = len(emb_weights.f)
+        num_shards = len(theta.emb.s.wm)
 
       def transpose_or_not(w):
         transpose = (p.softmax.num_sampled == 0)
@@ -845,10 +846,15 @@ class RnnLm(RnnLmNoEmbedding):
         if p.num_word_roles > 0:
           # for i in xrange(p.num_roles):
           #   softmax_theta = getattr(theta, 'softmax_%d' %i)
-          for shard_ind in xrange(num_shards):
-            f_shard = emb_weights.f[shard_ind]
-            reshaped_f_shard = tf.reshape(f_shard, [-1, p.softmax.input_dim])
-            theta.softmax['weight_%d' %shard_ind] = transpose_or_not(reshaped_f_shard)
+          if p.emb.lazy:
+            pass # NOTE lazy mode means don't share the softmax weights directly
+            # for shard_ind in xrange(num_shards):
+            #   theta.softmax['weight_%d' %shard_ind] = transpose_or_not(theta.emb.s.wm[shard_ind])
+          else:
+            for shard_ind in xrange(num_shards):
+              f_shard = emb_weights.f[shard_ind]
+              reshaped_f_shard = tf.reshape(f_shard, [-1, p.softmax.input_dim])
+              theta.softmax['weight_%d' %shard_ind] = transpose_or_not(reshaped_f_shard)
         else:
           for shard_ind in xrange(num_shards):
             theta.softmax['weight_%d' %shard_ind] = transpose_or_not(emb.e[shard_ind])
@@ -1362,6 +1368,7 @@ class HRREmbeddingLayer(base_layer.LayerBase):
     # p.Define('rs', layers.EmbeddingLayer.Params(), 'Role signature')
     p.Define('mode', 'basic', 'Modes')
     p.Define('merge', False, 'Flag to merge all collections of filler matrices into a big one')
+    p.Define('lazy', True, 'Flag to merge all collections of filler matrices into a big one')
     # TODO(jmluo)
     p.Define('vocab_size', 0, 'Vocabulary size')
     p.Define('actual_shards', -1, 'Actual number of shards used. This should not be specified, but computed during __init__ call')
@@ -1492,10 +1499,12 @@ class HRREmbeddingLayer(base_layer.LayerBase):
     p = self.params
 
     with tf.name_scope('HRR_emb_lookup'):
-      emb_weights = self._Emb2Weight(theta, role_anneal=role_anneal)
-
-
-      emb = tf.nn.embedding_lookup(emb_weights.e, ids, partition_strategy=p.s.partition_strategy)
+      if p.lazy:
+        emb_weights = self._Emb2WeightLazy(theta)
+        emb = emb_weights.func(ids).e
+      else:
+        emb_weights = self._Emb2Weight(theta, role_anneal=role_anneal)
+        emb = tf.nn.embedding_lookup(emb_weights.e, ids, partition_strategy=p.s.partition_strategy)
       s_cat = None
 
     # distribution constraint
@@ -1576,3 +1585,30 @@ class HRREmbeddingLayer(base_layer.LayerBase):
                               r=r_weights,
                               f=f_weights)
                                   
+  def _Emb2WeightLazy(self, theta):
+    '''
+    Returns a function handle instead of relevant tensors
+    '''
+    p = self.params
+    assert p.mode == 'basic'
+    
+    def _get_e_f_from_samples(samples):
+      e_weights = list()
+      rf_weights = list()
+      f_list = list()
+      all_weights = tf.concat(theta.s.wm, axis=0)
+      sampled_weights = tf.nn.embedding_lookup(theta.s.wm, samples, partition_strategy=p.s.partition_strategy)
+      sample_shape = tf.shape(samples)
+      s_weights = tf.reshape(sampled_weights, [-1, p.num_roles, p.num_fillers_per_role])
+      f_shard_list = list()
+      for role_ind in xrange(p.num_roles):
+        f_i = tf.matmul(s_weights[:, role_ind], theta.F[role_ind]) # size: V/ns x d
+        f_list.append(f_i)
+      f = tf.stack(f_list, axis=1) # size: V/n_shards x nr x d
+      rf = self._circular_conv(theta.r, f)
+      e = tf.reduce_sum(rf, axis=1)
+      e = tf.reshape(e, tf.concat([sample_shape, [p.embedding_dim]], axis=0))
+      f = tf.reshape(f, tf.concat([sample_shape, [p.num_roles, p.embedding_dim]], axis=0))
+      return py_utils.NestedMap(e=e, f=f)
+    
+    return py_utils.NestedMap(func=_get_e_f_from_samples, r=theta.r, num_shards=len(theta.s.wm), ids=tf.range(0, p.vocab_size, dtype=tf.int64))

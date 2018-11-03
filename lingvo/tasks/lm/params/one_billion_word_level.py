@@ -30,7 +30,7 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
   EMBEDDING_DIM = 512
   MAX_TOKENS = 512
   NUM_EMBEDDING_SHARDS = 8
-  NUM_SAMPLED = 4096
+  NUM_SAMPLED = 8192
   NUM_SOFTMAX_SHARDS = 8
   RNN_STATE_DIM = 512
   VOCAB_SIZE = 218160  # includes <epsilon>, vocabulary in fst symtable format
@@ -44,7 +44,7 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
     # # p.bucket_batch_limit = [256, 128, 128, 64, 64, 32, 16, 8, 4]
     # p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
     p.bucket_upper_bound = [10, 20, 30, 40, 50]
-    p.bucket_batch_limit = [64] * len(p.bucket_upper_bound)
+    p.bucket_batch_limit = [128] * len(p.bucket_upper_bound)
     p.file_buffer_size = 10000000
     p.file_parallelism = 10
     p.file_pattern = 'text:' + os.path.join(
@@ -237,6 +237,7 @@ class OneBillionHRRWordLevelNF50(OneBillionBaseline):
     hrr.num_roles = cls.NUM_ROLES
     hrr.num_fillers_per_role = cls.NUM_FILLERS_PER_ROLE
     hrr.s.embedding_dim = cls.NUM_FILLERS_PER_ROLE * cls.NUM_ROLES
+    hrr.lazy = True
     p.lm.emb = hrr
     p.lm.num_word_roles = cls.NUM_ROLES
     p.lm.softmax.num_roles = cls.NUM_ROLES
