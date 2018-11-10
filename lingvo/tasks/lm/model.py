@@ -20,6 +20,7 @@ from __future__ import print_function
 
 from six.moves import zip
 import tensorflow as tf
+import numpy as np
 
 from lingvo.core import base_layer
 from lingvo.core import base_model
@@ -57,6 +58,8 @@ class LanguageModel(base_model.BaseTask):
     tp.l2_regularizer_weight = 1e-6
     tp.clip_gradient_norm_to_value = 1.0
     tp.grad_norm_to_clip_to_zero = 100.0
+    p.Define('batch_size', 20, 'Batch size')
+    p.Define('contiguous', False, 'Flag')
     return p
 
   @base_layer.initializer
@@ -72,6 +75,23 @@ class LanguageModel(base_model.BaseTask):
       # Construct the model.
       self.CreateChild('lm', p.lm)
 
+    def get_weight_params():
+      return py_utils.WeightParams(
+        shape=[1, p.batch_size, p.lm.emb.embedding_dim],
+        init=py_utils.WeightInit.Constant(scale=np.zeros([p.batch_size, p.lm.emb.embedding_dim])),
+        dtype=tf.float32,
+        collections=[self.__class__.__name__ + '_vars'])
+
+    # buffs = dict()
+    for i in range(p.lm.rnns.num_layers):
+      m = get_weight_params()
+      c = get_weight_params()
+      self.CreateVariable('last_state_%d_m' %i, m, trainable=False)
+      self.CreateVariable('last_state_%d_c' %i, c, trainable=False)
+      # buffs['last_state_%d_m' %i] = tf.Variable(np.zeros([p.batch_size, p.lm.emb.embedding_dim]), trainable=False, name='last_state_%d_m' %i, dtype=tf.float32)
+      # buffs['last_state_%d_c' %i] = tf.Variable(np.zeros([p.batch_size, p.lm.emb.embedding_dim]), trainable=False, name='last_state_%d_c' %i, dtype=tf.float32)
+    # self.buffs = buffs
+      
   def _TrimIfPossibleThenTranspose(self, ids, paddings, labels, weights, chunk_ids=None):
     data = (ids, paddings, labels, weights)
     if not py_utils.use_tpu():
@@ -91,15 +111,46 @@ class LanguageModel(base_model.BaseTask):
 
     seqlen = tf.shape(ids)[0]
     batch_size = tf.shape(ids)[1]
-    state0 = self.lm.zero_state(batch_size)
+    zero_state = self.lm.zero_state(batch_size)
+    
+    with tf.name_scope('prepare_state'):
+      if p.contiguous:
+        state0 = py_utils.NestedMap(rnn=[])
+        for i in range(p.lm.rnns.num_layers):
+          if p.is_eval:
+            last_m = tf.reshape(self.theta['last_state_%d_m' %i], [p.batch_size, p.lm.emb.embedding_dim])
+            last_c = tf.reshape(self.theta['last_state_%d_c' %i], [p.batch_size, p.lm.emb.embedding_dim])
+          else:
+            last_m = self.theta['last_state_%d_m' %i]
+            last_c = self.theta['last_state_%d_c' %i]
+          m = tf.cond(input_batch.take_last_state, lambda: last_m, lambda: zero_state.rnn[i].m)
+          c = tf.cond(input_batch.take_last_state, lambda: last_c, lambda: zero_state.rnn[i].c)
+          # c = tf.Print(c, [c])
+          state0.rnn.append(py_utils.NestedMap(c=c, m=m))
+      else:
+        state0 = zero_state
     labels = py_utils.NestedMap(class_ids=labels_ids, class_weights=weights)
     
-    xent_output, _ = self.lm.FProp(theta.lm, ids, paddings, state0, labels=labels, chunk_ids=chunk_ids)
-
+    xent_output, state1 = self.lm.FProp(theta.lm, ids, paddings, state0, labels=labels, chunk_ids=chunk_ids)
+    
+    # self.state1 = state1
+    
+    if p.contiguous:
+      assign_ops = list()
+      for i in range(p.lm.rnns.num_layers):
+        m = tf.reshape(state1.rnn[i].m, [1, p.batch_size, p.lm.emb.embedding_dim])
+        c = tf.reshape(state1.rnn[i].c, [1, p.batch_size, p.lm.emb.embedding_dim])
+        if not p.is_eval:
+          state1.rnn[i].m = m
+          state1.rnn[i].c = c
+        assign_ops.append(tf.assign(self.vars['last_state_%i_m' %i], m))
+        assign_ops.append(tf.assign(self.vars['last_state_%i_c' %i], c))
+      self.last_state_group_op = tf.group(*assign_ops)
+    
     # +1 to account for the end of sequence symbol.
     div = 2 if p.input.use_chunks else 1 # tags shouldn't be counted as words
     num_words = tf.cast(
-        tf.reduce_sum(input_batch.word_count // div + tf.constant(1, dtype=tf.int32)),
+        tf.reduce_sum(input_batch.word_count // div + tf.constant(1, dtype=tf.int32) * (1 - p.contiguous)),
         tf.float32)
     predicted_labels = tf.cast(xent_output.per_example_argmax, labels_ids.dtype)
 

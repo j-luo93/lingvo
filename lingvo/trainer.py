@@ -396,6 +396,13 @@ class Trainer(base_runner.BaseRunner):
     self._RunLoop('trainer/enqueue_op/%s' % op.name, self._LoopEnqueue, op)
 
   def _Loop(self):
+    # builder = tf.profiler.ProfileOptionBuilder
+    # opts = builder(builder.time_and_memory()).order_by('micros').build()
+    # Create a profiling context, set constructor argument `trace_steps`,
+    # `dump_steps` to empty for explicit control.
+    # with tf.contrib.tfprof.ProfileContext('/tmp/train_dir',
+    #                                       trace_steps=[],
+    #                                       dump_steps=[]) as pctx:
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
       sess.run(self.initialize_tables)
@@ -424,6 +431,10 @@ class Trainer(base_runner.BaseRunner):
       status_interval_steps = 100
       next_status_step = 1
       eval_metrics = None
+      # 
+      # from tensorflow.python import debug as tf_debug
+      # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+
       while True:
         if (self._trial.ShouldStopAndMaybeReport(global_step, eval_metrics) or
             self._ShouldStop(sess, global_step)):
@@ -456,14 +467,15 @@ class Trainer(base_runner.BaseRunner):
             except AttributeError:
               pass
               
-        # from tensorflow.python import debug as tf_debug
-        # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+        # pctx.trace_next_step()
+        # pctx.dump_next_step()
 
         _, global_step, eval_metrics = sess.run([
             model_task.train_op,
             self._model.global_step,
             model_task.eval_metrics,
         ])
+        # pctx.profiler.profile_operations(options=opts)
         msg = 'step:%6d' % (global_step)
         for key, (val, _) in sorted(six.iteritems(eval_metrics)):
           msg += ' %s:%.8g' % (key, val)
@@ -556,15 +568,32 @@ class Evaler(base_runner.BaseRunner):
         name: metrics.AverageMetric() for name in self._model_task.eval_metrics
     }
     num_samples_metric = metrics_dict['num_samples_in_batch']
+    
+    #from tensorflow.python import debug as tf_debug
+    #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+
     while (num_samples_metric.total_value <
            self._model_task.params.eval.samples_per_summary):
-      if self._summary_op is None:
-        # No summaries were collected.
-        ans = sess.run(self._model_task.eval_metrics)
-      else:
-        ans, summary = sess.run(
-            [self._model_task.eval_metrics, self._summary_op])
+      all_ops = [self._model_task.eval_metrics]
+      all_keys = ['eval']
+      if hasattr(self._model_task, 'last_state_group_op'):
+        all_ops.append(self._model_task.last_state_group_op)
+        all_keys.append('update')
+      if self._summary_op is not None:
+        all_ops.append(self._summary_op)
+        all_keys.append('summary')
+
+      ret = sess.run(all_ops) 
+      #  # No summaries were collected.
+      #  ans = sess.run([self._model_task.eval_metrics)
+      #else:
+      #  ans, summary = sess.run(
+      #      [self._model_task.eval_metrics, self._summary_op])
+      #  self._summary_writer.add_summary(summary, global_step)
+      if 'summary' in all_keys:
+        summary = ret[-1]
         self._summary_writer.add_summary(summary, global_step)
+      ans = ret[0]
       for name, (value, weight) in six.iteritems(ans):
         metrics_dict[name].Update(value, weight)
       tf.logging.info('Total examples done: %d/%d',

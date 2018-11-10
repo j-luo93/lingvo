@@ -200,13 +200,13 @@ class RnnLmNoEmbedding(BaseLanguageModel):
   @classmethod
   def Params(cls):
     p = super(RnnLmNoEmbedding, cls).Params()
-    p.Define('rnns', rnn_layers.StackedFRNNLayerByLayer.Params(),
+    p.Define('rnns', rnn_layers.StackedCuDNNLSTM.Params(),
              'The stacked-RNNs layer params.')
     p.Define('softmax', layers.SimpleFullSoftmax.Params(),
              'The softmax layer params.')
     p.Define('pred_proj', layers.ProjectionLayer.Params(),
              'The projection layer params.')
-    p.Define('pred_rnn', rnn_layers.StackedFRNNLayerByLayer.Params(),
+    p.Define('pred_rnn', rnn_layers.StackedCuDNNLSTM.Params(),
              'The rnn layer for chunk prediction')
     p.Define(
         'direct_features_dim', 0,
@@ -711,7 +711,7 @@ class RnnLm(RnnLmNoEmbedding):
     # Embedding.
     p.emb.vocab_size = vocab_size
     p.emb.embedding_dim = emb_dim
-    p.emb.scale_sqrt_depth = True
+    p.emb.scale_sqrt_depth = False # why??
     p.emb.params_init = py_utils.WeightInit.Uniform(init_scale)
 
     # RNNs

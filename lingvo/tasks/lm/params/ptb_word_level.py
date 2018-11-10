@@ -5,6 +5,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import math
 
 from lingvo import model_registry
 from lingvo.core import base_model_params
@@ -27,12 +28,12 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
   # One Billion Words benchmark corpus is available in iq, li and ok.
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/ptb/')
-  EMBEDDING_DIM = 512
+  EMBEDDING_DIM = 650
   MAX_TOKENS = 512
   NUM_EMBEDDING_SHARDS = 1
   NUM_SAMPLED = 0
   NUM_SOFTMAX_SHARDS = 1
-  RNN_STATE_DIM = 512
+  RNN_STATE_DIM = 650
   VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
 
@@ -98,7 +99,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
         num_layers=num_layers,
         residual_start=3,  # disable residuals
         rnn_dims=cls.EMBEDDING_DIM,
-        rnn_hidden_dims=cls.RNN_STATE_DIM)
+        rnn_hidden_dims=0)#cls.RNN_STATE_DIM)
 
     # Input embedding needs to be sharded.
     lm.emb.max_num_shards = cls.NUM_EMBEDDING_SHARDS
@@ -130,7 +131,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p.name = 'ptb_word_level_lm'
     p.eval.samples_per_summary = 10000
 
-    p.lm = cls.get_lm_params(1, 0.5)
+    p.lm = cls.get_lm_params(2, 0.5)
     
     # Adjusts training params.
     tp = p.train
@@ -172,7 +173,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
 
     # HACK
     # use uniform initializer (-scale, scale)
-    scale = 0.08
+    scale = 0.05
     def iter_iter(p, pattern):
       for name, param in p.IterParams():
         if hasattr(param, 'IterParams'):
@@ -194,30 +195,60 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
       #param.zo_prob = 0.15
 
     ## gradient norm clipping
-    p.train.clip_gradient_norm_to_value = 10.0
+    p.train.clip_gradient_norm_to_value = 5.0
     p.train.grad_norm_to_clip_to_zero = 0.0
     p.train.max_lstm_gradient_norm = 0
 
     p.train.save_interval_seconds = 100
     p.train.summary_interval_steps = 100
     return p
-# 
-# @model_registry.RegisterSingleTaskModel
-# class PennBaselineSGD(PennBaseline):
-# 
-#     @classmethod
-#     def Task(cls):
-#         p = super(PennBaseline, cls).Task()
-#         # Use SGD and dev-based decay learning schedule
-#         p.train.lr_schedule = (
-#             lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=100))
-#         p.train.optimizer = optimizer.SGD.Params()
-#         p.train.lr_schedule.metric_history.local_filesystem = True
-#         p.train.learning_rate = 1.0
-# 
-#         p.train.clip_gradient_norm_to_value = 10.0
-# 
-#         return p
+
+@model_registry.RegisterSingleTaskModel
+class PennBaselineCont(PennBaseline):
+  
+  @classmethod
+  def Train(cls):
+    p = super(PennBaselineCont, cls).Train()
+    p.contiguous = True
+    p.ckpt = 'HRR/data/ptb/train.ckpt'
+    p.data = 'ids_train'
+    p.num_steps = 35
+    p.data_shape = (929564,)
+    return p
+    
+  @classmethod
+  def Dev(cls):
+    p = super(PennBaselineCont, cls).Dev()
+    p.contiguous = True
+    p.eval = True
+    p.ckpt = 'HRR/data/ptb/dev.ckpt'
+    p.data = 'ids_dev'
+    p.num_steps = 35
+    p.data_shape = (73760,)
+    p.num_samples = int(math.ceil((p.data_shape[0] // p.batch_size) / p.num_steps) * p.batch_size)
+    return p
+    
+  @classmethod
+  def Test(cls):
+    p = super(PennBaselineCont, cls).Test()
+    p.contiguous = True
+    p.eval = True
+    p.ckpt = 'HRR/data/ptb/test.ckpt'
+    p.data = 'ids_test'
+    p.num_steps = 35
+    p.data_shape = (82430,)
+    p.num_samples = int(math.ceil((p.data_shape[0] // p.batch_size) / p.num_steps) * p.batch_size)
+    return p
+  
+  @classmethod
+  def Task(cls):
+    p = super(PennBaselineCont, cls).Task()
+    p.contiguous = True
+    p.train.optimizer = optimizer.SGD.Params()
+    p.train.learning_rate = 1.0
+    p.train.save_interval_seconds = 200
+    p.train.summary_interval_steps = 200
+    return p
 
 @model_registry.RegisterSingleTaskModel
 class PennBaselineNoSum(PennBaseline):
@@ -257,7 +288,7 @@ class PennHRRWordLevelNF50(PennBaseline):
     hrr.num_roles = cls.NUM_ROLES
     hrr.num_fillers_per_role = cls.NUM_FILLERS_PER_ROLE
     hrr.s.embedding_dim = cls.NUM_FILLERS_PER_ROLE * cls.NUM_ROLES
-    hrr.lazy = True
+    hrr.lazy = False
     p.lm.emb = hrr
     p.lm.num_word_roles = cls.NUM_ROLES
     p.lm.softmax.num_roles = cls.NUM_ROLES
@@ -429,3 +460,4 @@ class PennTaggedHRRChunkLevelNR4NF125RNNFixedBases(PennTaggedHRRChunkLevelNF250R
     p = super(PennTaggedHRRChunkLevelNR4NF125RNNFixedBases, cls).Task()
     p.lm.softmax.role_anneal_steps = [3000, 4000, 5000]
     return p
+                                                                                                                                                                                                                                                                                       
