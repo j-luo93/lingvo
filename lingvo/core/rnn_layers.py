@@ -180,6 +180,7 @@ class StackedRNNBase(base_layer.LayerBase):
     p.Define('dropout', layers.DropoutLayer.Params(),
              'Dropout applied to each layer.')
     p.Define('packed_input', False, 'To reset states for packed inputs.')
+    p.Define('drop_last', True, 'Dropout to last layer as well')
     return p
 
   @base_layer.initializer
@@ -263,7 +264,8 @@ class StackedFRNNLayerByLayer(StackedRNNBase):
     for i in range(p.num_layers):
       ys, state1.rnn[i] = self.rnn[i].FProp(theta.rnn[i], xs, paddings,
                                             state0.rnn[i])
-      ys = self.dropout.FProp(theta.dropout, ys)
+      if i != p.num_layers - 1 or p.drop_last:
+        ys = self.dropout.FProp(theta.dropout, ys)
       if i >= p.skip_start:
         ys += xs
       xs = ys
@@ -767,7 +769,8 @@ class StackedCuDNNLSTM(StackedRNNBase):
     for i in range(p.num_layers):
       ys, state1.rnn[i] = self.rnn[i].FProp(theta.rnn[i], xs, paddings,
                                             state0.rnn[i])
-      ys = self.dropout.FProp(theta.dropout, ys)
+      if i != p.num_layers - 1 or p.drop_last:
+        ys = self.dropout.FProp(theta.dropout, ys)
       xs = ys
     return xs, state1
 

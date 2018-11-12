@@ -484,7 +484,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
 
       preceding_shape = tf.shape(activation)[:-1]
       f_noisy = self.emb.decode(tf.expand_dims(activation, axis=-2), emb_weights.r) # This is actually a bit hacky -- you don't know you have emb attribute
-      if p.decoded_filler_keep_prob > 0 and not p.is_eval:
+      if p.decoded_filler_keep_prob < 1.0 and not p.is_eval:
         f_noisy = tf.nn.dropout(f_noisy, p.decoded_filler_keep_prob)
 
       cat = tf.reshape(f_noisy, tf.concat([preceding_shape, [p.softmax.input_dim]], axis=0))
@@ -711,7 +711,7 @@ class RnnLm(RnnLmNoEmbedding):
     # Embedding.
     p.emb.vocab_size = vocab_size
     p.emb.embedding_dim = emb_dim
-    p.emb.scale_sqrt_depth = False # why??
+    p.emb.scale_sqrt_depth = False 
     p.emb.params_init = py_utils.WeightInit.Uniform(init_scale)
 
     # RNNs

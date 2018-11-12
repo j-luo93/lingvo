@@ -480,8 +480,8 @@ class BaseTask(base_layer.LayerBase):
 
     # Update stats.
     stats_updates = tf.group(
-        self.IncrementTotalSamples(),)
-        # self.IncrementTotalNans(tf.to_int32(has_nan_or_inf)))
+        self.IncrementTotalSamples(),
+        self.IncrementTotalNans(tf.to_int32(has_nan_or_inf)))
 
     # Post training step update.
     post_training_step_updates = self.PostTrainingStepUpdate(self._global_step)

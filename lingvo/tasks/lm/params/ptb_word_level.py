@@ -18,6 +18,19 @@ from lingvo.tasks.lm import input_generator as lm_inp
 from lingvo.tasks.lm import layers as lm_layers
 from lingvo.tasks.lm import model
 
+def iter_iter(p, pattern, scale):
+  for name, param in p.IterParams():
+    if hasattr(param, 'IterParams'):
+      if pattern in name:
+        d = {name: py_utils.WeightInit.Uniform(scale=scale)}
+        p.Set(**d)
+      else:
+        iter_iter(param, pattern, scale)
+    elif isinstance(param, list):
+      for cell_p in param:
+        if hasattr(cell_p, 'IterParams'):
+          cell_p.Set(params_init=py_utils.WeightInit.Uniform(scale=scale))
+
 '''
 PTB baseline with tied embeddings
 '''
@@ -28,12 +41,12 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
   # One Billion Words benchmark corpus is available in iq, li and ok.
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/ptb/')
-  EMBEDDING_DIM = 650
+  EMBEDDING_DIM = 512
   MAX_TOKENS = 512
   NUM_EMBEDDING_SHARDS = 1
   NUM_SAMPLED = 0
   NUM_SOFTMAX_SHARDS = 1
-  RNN_STATE_DIM = 650
+  RNN_STATE_DIM = 512
   VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
 
@@ -42,7 +55,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p = lm_inp.LmInput.Params()
     #p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
     #p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
-    p.bucket_upper_bound = [10, 20, 30, 40, 50, 100]
+    p.bucket_upper_bound = [10, 20, 30, 40, 50]#, 100]
     p.bucket_batch_limit = [128] * len(p.bucket_upper_bound)
     #p.bucket_batch_limit = [64] * len(p.bucket_upper_bound) # [1024, 512, 256, 256, 128, 128, 64, 32, 16]
     p.file_buffer_size = 10000000
@@ -131,7 +144,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p.name = 'ptb_word_level_lm'
     p.eval.samples_per_summary = 10000
 
-    p.lm = cls.get_lm_params(2, 0.5)
+    p.lm = cls.get_lm_params(1, 0.5)
     
     # Adjusts training params.
     tp = p.train
@@ -173,29 +186,17 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
 
     # HACK
     # use uniform initializer (-scale, scale)
-    scale = 0.05
-    def iter_iter(p, pattern):
-      for name, param in p.IterParams():
-        if hasattr(param, 'IterParams'):
-          if pattern in name:
-            d = {name: py_utils.WeightInit.Uniform(scale=scale)}
-            p.Set(**d)
-          else:
-            iter_iter(param, pattern)
-        elif isinstance(param, list):
-          for cell_p in param:
-            if hasattr(cell_p, 'IterParams'):
-              cell_p.Set(params_init=py_utils.WeightInit.Uniform(scale=scale))
-    iter_iter(p, 'params_init')
+    iter_iter(p, 'params_init', 0.08)
 
     # forget gate bias set to 1.0
     for param in p.lm.rnns.cell_tpl:
-      param.forget_gate_bias = 1.0
-      # param.cell_value_cap  = 0.0
+      # make it compatible with cudnnlstm
+      param.forget_gate_bias = 0
+      param.cell_value_cap = None 
       #param.zo_prob = 0.15
 
     ## gradient norm clipping
-    p.train.clip_gradient_norm_to_value = 5.0
+    p.train.clip_gradient_norm_to_value = 10.0
     p.train.grad_norm_to_clip_to_zero = 0.0
     p.train.max_lstm_gradient_norm = 0
 
@@ -244,11 +245,57 @@ class PennBaselineCont(PennBaseline):
   def Task(cls):
     p = super(PennBaselineCont, cls).Task()
     p.contiguous = True
-    p.train.optimizer = optimizer.SGD.Params()
-    p.train.learning_rate = 1.0
+    #p.train.optimizer = optimizer.SGD.Params()
+    #p.train.learning_rate = 1.0
     p.train.save_interval_seconds = 200
     p.train.summary_interval_steps = 200
     return p
+
+Penn = PennBaselineCont
+#Penn = PennBaseline
+
+@model_registry.RegisterSingleTaskModel
+class PennBaselineContNL2(Penn):
+
+  @classmethod
+  def Task(cls):
+    p = super(PennBaselineContNL2, cls).Task()
+    p.lm = cls.get_lm_params(2, 0.5)
+    return p
+
+@model_registry.RegisterSingleTaskModel
+class PennBaselineContNL2D650(PennBaselineContNL2):
+
+  EMBEDDING_DIM = 650
+  RNN_STATE_DIM = 650
+  
+  @classmethod
+  def Task(cls):
+    p = super(PennBaselineContNL2D650, cls).Task()
+    iter_iter(p, 'params_init', 0.05)
+    return p
+
+@model_registry.RegisterSingleTaskModel
+class PennBaselineContNL2D650Max5(PennBaselineContNL2D650):
+
+  @classmethod
+  def Task(cls):
+    p = super(PennBaselineContNL2D650Max5, cls).Task()
+    p.train.clip_gradient_norm_to_value = 5.0
+    return p
+
+@model_registry.RegisterSingleTaskModel
+class PennBaselineContNL2D650Max5SGD(PennBaselineContNL2D650Max5):
+
+  @classmethod
+  def Task(cls):
+    p = super(PennBaselineContNL2D650Max5SGD, cls).Task()
+    p.train.optimizer = optimizer.SGD.Params()
+    p.train.learning_rate = 1.0
+    return p
+
+#PennBaselineBest = PennBaseline
+PennBaselineBest = PennBaselineContNL2D650Max5SGD
 
 @model_registry.RegisterSingleTaskModel
 class PennBaselineNoSum(PennBaseline):
@@ -269,7 +316,7 @@ class PennBaselineD650(PennBaseline):
 Word level HRR, with num_fillers = 50
 '''
 @model_registry.RegisterSingleTaskModel
-class PennHRRWordLevelNF50(PennBaseline):
+class PennHRRWordLevelNF50(PennBaselineBest):
   """Use sampled soft-max in training."""
 
   NUM_ROLES = 2
@@ -295,8 +342,10 @@ class PennHRRWordLevelNF50(PennBaseline):
     p.lm.softmax.input_dim *= cls.NUM_ROLES # size: |V| x nr*d
     # dropout for f_noisy
     p.lm.decoded_filler_keep_prob = 0.5
+    #p.lm.rnns.drop_last = False
     # annealing for second role
-    p.lm.softmax.role_anneal_steps = [3000]
+    p.lm.softmax.role_anneal_steps = [15000]#[3000]
+    #p.lm.softmax.role_anneal_steps = [15000]
     # isometric loss
     p.train.isometric = 1e2
 
@@ -323,6 +372,21 @@ class PennHRRWordLevelNF250FixedBases(PennHRRWordLevelNF250):
     return p
 
 @model_registry.RegisterSingleTaskModel
+class PennHRRWordLevelNF320FixedBases(PennHRRWordLevelNF250FixedBases): 
+  NUM_FILLERS_PER_ROLE = 320
+
+@model_registry.RegisterSingleTaskModel
+class PennHRRWordLevelNR4NF125(PennHRRWordLevelNF250):
+  NUM_FILLERS_PER_ROLE = 125
+  NUM_ROLES = 4
+  
+  @classmethod
+  def Task(cls):
+    p = super(PennHRRWordLevelNR4NF125, cls).Task()
+    p.lm.softmax.role_anneal_steps = [3000, 4000, 5000]
+    return p
+
+@model_registry.RegisterSingleTaskModel
 class PennHRRWordLevelNR4NF125FixedBases(PennHRRWordLevelNF250FixedBases):
   NUM_FILLERS_PER_ROLE = 125
   NUM_ROLES = 4
@@ -333,12 +397,16 @@ class PennHRRWordLevelNR4NF125FixedBases(PennHRRWordLevelNF250FixedBases):
     p.lm.softmax.role_anneal_steps = [3000, 4000, 5000]
     return p
 
-
+@model_registry.RegisterSingleTaskModel
+class PennHRRWordLevelNR4NF160FixedBases(PennHRRWordLevelNR4NF125FixedBases):
+  NUM_FILLERS_PER_ROLE = 160
+  NUM_ROLES = 4
+  
 '''
 PTB baseline with tied embeddings on tagged data (chunks).
 '''
 @model_registry.RegisterSingleTaskModel
-class PennTaggedBaseline(PennBaseline):
+class PennTaggedBaseline(PennBaselineBest):
 
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/ptb-chunk')
@@ -461,3 +529,4 @@ class PennTaggedHRRChunkLevelNR4NF125RNNFixedBases(PennTaggedHRRChunkLevelNF250R
     p.lm.softmax.role_anneal_steps = [3000, 4000, 5000]
     return p
                                                                                                                                                                                                                                                                                        
+                                                                                                                                   
