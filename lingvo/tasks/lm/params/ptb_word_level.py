@@ -41,12 +41,12 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
   # One Billion Words benchmark corpus is available in iq, li and ok.
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/ptb/')
-  EMBEDDING_DIM = 512
+  EMBEDDING_DIM = 650
   MAX_TOKENS = 512
   NUM_EMBEDDING_SHARDS = 1
   NUM_SAMPLED = 0
   NUM_SOFTMAX_SHARDS = 1
-  RNN_STATE_DIM = 512
+  RNN_STATE_DIM = 650
   VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
 
@@ -144,7 +144,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p.name = 'ptb_word_level_lm'
     p.eval.samples_per_summary = 10000
 
-    p.lm = cls.get_lm_params(1, 0.5)
+    p.lm = cls.get_lm_params(2, 0.5)
     
     # Adjusts training params.
     tp = p.train
@@ -181,12 +181,14 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     
     ######################### stuff I added to the base ########################
 
-    p.train.optimizer = optimizer.Adam.Params()
-    p.train.learning_rate = 2e-3
+    p.train.optimizer = optimizer.SGD.Params()
+    p.train.learning_rate = 1.0
+    #p.train.optimizer = optimizer.Adam.Params()
+    #p.train.learning_rate = 2e-3
 
     # HACK
     # use uniform initializer (-scale, scale)
-    iter_iter(p, 'params_init', 0.08)
+    iter_iter(p, 'params_init', 0.05)
 
     # forget gate bias set to 1.0
     for param in p.lm.rnns.cell_tpl:
@@ -196,7 +198,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
       #param.zo_prob = 0.15
 
     ## gradient norm clipping
-    p.train.clip_gradient_norm_to_value = 10.0
+    p.train.clip_gradient_norm_to_value = 5.0#10.0
     p.train.grad_norm_to_clip_to_zero = 0.0
     p.train.max_lstm_gradient_norm = 0
 
@@ -245,78 +247,44 @@ class PennBaselineCont(PennBaseline):
   def Task(cls):
     p = super(PennBaselineCont, cls).Task()
     p.contiguous = True
-    #p.train.optimizer = optimizer.SGD.Params()
-    #p.train.learning_rate = 1.0
     p.train.save_interval_seconds = 200
     p.train.summary_interval_steps = 200
+    p.train.lr_schedule = (
+        lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=1000))
     return p
 
-Penn = PennBaselineCont
-#Penn = PennBaseline
-
-@model_registry.RegisterSingleTaskModel
-class PennBaselineContNL2(Penn):
-
-  @classmethod
-  def Task(cls):
-    p = super(PennBaselineContNL2, cls).Task()
-    p.lm = cls.get_lm_params(2, 0.5)
-    return p
-
-@model_registry.RegisterSingleTaskModel
-class PennBaselineContNL2D650(PennBaselineContNL2):
-
-  EMBEDDING_DIM = 650
-  RNN_STATE_DIM = 650
-  
-  @classmethod
-  def Task(cls):
-    p = super(PennBaselineContNL2D650, cls).Task()
-    iter_iter(p, 'params_init', 0.05)
-    return p
-
-@model_registry.RegisterSingleTaskModel
-class PennBaselineContNL2D650Max5(PennBaselineContNL2D650):
-
-  @classmethod
-  def Task(cls):
-    p = super(PennBaselineContNL2D650Max5, cls).Task()
-    p.train.clip_gradient_norm_to_value = 5.0
-    return p
-
-@model_registry.RegisterSingleTaskModel
-class PennBaselineContNL2D650Max5SGD(PennBaselineContNL2D650Max5):
-
-  @classmethod
-  def Task(cls):
-    p = super(PennBaselineContNL2D650Max5SGD, cls).Task()
-    p.train.optimizer = optimizer.SGD.Params()
-    p.train.learning_rate = 1.0
-    return p
-
-#PennBaselineBest = PennBaseline
-PennBaselineBest = PennBaselineContNL2D650Max5SGD
-
-@model_registry.RegisterSingleTaskModel
-class PennBaselineNoSum(PennBaseline):
-
-  @classmethod
-  def Task(cls):
-    p = super(PennBaselineNoSum, cls).Task()
-    p.train.sum_loss_across_tokens_in_batch = False
-    return p
-
-@model_registry.RegisterSingleTaskModel
-class PennBaselineD650(PennBaseline):
-    
-    EMBEDDING_DIM = 650
-    RNN_STATE_DIM = 650
+# helper function: add some HRR-specific options
+def HRRify(p, cls):
+  old_params = p.lm.emb
+  hrr = lm_layers.HRREmbeddingLayer.Params()
+  hrr.s = old_params.Copy()
+  hrr.e_l = old_params.Copy()
+  hrr.vocab_size = hrr.e_l.vocab_size = cls.VOCAB_SIZE
+  hrr.s.vocab_size = cls.VOCAB_SIZE
+  hrr.embedding_dim = hrr.e_l.embedding_dim = cls.EMBEDDING_DIM
+  hrr.num_roles = cls.NUM_ROLES
+  hrr.num_fillers_per_role = cls.NUM_FILLERS_PER_ROLE
+  hrr.s.embedding_dim = cls.NUM_FILLERS_PER_ROLE * cls.NUM_ROLES
+  hrr.lazy = False
+  p.lm.emb = hrr
+  p.lm.num_word_roles = cls.NUM_ROLES
+  p.lm.softmax.num_roles = cls.NUM_ROLES
+  p.lm.softmax.input_dim *= cls.NUM_ROLES # size: |V| x nr*d
+  # dropout for f_noisy
+  p.lm.decoded_filler_keep_prob = 0.5
+  #p.lm.rnns.drop_last = False
+  # annealing for second role
+  p.lm.softmax.role_anneal_steps = [15000]#[3000]
+  #p.lm.softmax.role_anneal_steps = [15000]
+  # isometric loss
+  p.train.isometric = 1e2
+  return p
 
 '''
 Word level HRR, with num_fillers = 50
 '''
 @model_registry.RegisterSingleTaskModel
-class PennHRRWordLevelNF50(PennBaselineBest):
+class PennHRRWordLevelNF50(PennBaseline):
   """Use sampled soft-max in training."""
 
   NUM_ROLES = 2
@@ -325,30 +293,8 @@ class PennHRRWordLevelNF50(PennBaselineBest):
   @classmethod
   def Task(cls):
     p = super(PennHRRWordLevelNF50, cls).Task()
-    old_params = p.lm.emb
-    hrr = lm_layers.HRREmbeddingLayer.Params()
-    hrr.s = old_params.Copy()
-    hrr.e_l = old_params.Copy()
-    hrr.vocab_size = hrr.e_l.vocab_size = cls.VOCAB_SIZE
-    hrr.s.vocab_size = cls.VOCAB_SIZE
-    hrr.embedding_dim = hrr.e_l.embedding_dim = cls.EMBEDDING_DIM
-    hrr.num_roles = cls.NUM_ROLES
-    hrr.num_fillers_per_role = cls.NUM_FILLERS_PER_ROLE
-    hrr.s.embedding_dim = cls.NUM_FILLERS_PER_ROLE * cls.NUM_ROLES
-    hrr.lazy = False
-    p.lm.emb = hrr
-    p.lm.num_word_roles = cls.NUM_ROLES
-    p.lm.softmax.num_roles = cls.NUM_ROLES
-    p.lm.softmax.input_dim *= cls.NUM_ROLES # size: |V| x nr*d
-    # dropout for f_noisy
-    p.lm.decoded_filler_keep_prob = 0.5
-    #p.lm.rnns.drop_last = False
-    # annealing for second role
-    p.lm.softmax.role_anneal_steps = [15000]#[3000]
-    #p.lm.softmax.role_anneal_steps = [15000]
-    # isometric loss
-    p.train.isometric = 1e2
-
+    p = HRRify(p, cls)
+    p.lm.softmax.role_anneal_steps = [3000]
     return p
 
 @model_registry.RegisterSingleTaskModel
@@ -374,6 +320,24 @@ class PennHRRWordLevelNF250FixedBases(PennHRRWordLevelNF250):
 @model_registry.RegisterSingleTaskModel
 class PennHRRWordLevelNF320FixedBases(PennHRRWordLevelNF250FixedBases): 
   NUM_FILLERS_PER_ROLE = 320
+
+'''
+Word level HRR with contiguous input, with num_fillers = 50
+'''
+@model_registry.RegisterSingleTaskModel
+class PennHRRContWordLevelNF320FixedBases(PennBaselineCont):
+  """Use sampled soft-max in training."""
+
+  NUM_ROLES = 2
+  NUM_FILLERS_PER_ROLE = 320
+
+  @classmethod
+  def Task(cls):
+    p = super(PennHRRContWordLevelNF320FixedBases, cls).Task()
+    p = HRRify(p, cls)
+    p.lm.emb.trainable_basis = False
+    p.train.isometric = 0.
+    return p
 
 @model_registry.RegisterSingleTaskModel
 class PennHRRWordLevelNR4NF125(PennHRRWordLevelNF250):
@@ -406,12 +370,12 @@ class PennHRRWordLevelNR4NF160FixedBases(PennHRRWordLevelNR4NF125FixedBases):
 PTB baseline with tied embeddings on tagged data (chunks).
 '''
 @model_registry.RegisterSingleTaskModel
-class PennTaggedBaseline(PennBaselineBest):
+class PennTaggedBaseline(PennBaseline):
 
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/ptb-chunk')
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
-  NUM_SAMPLED = 9999
+  NUM_SAMPLED = 0#9999
   VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
 
   @classmethod
@@ -442,7 +406,7 @@ class PennTaggedHRRWordLevelNF50(PennHRRWordLevelNF50):
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/ptb-chunk')
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
-  NUM_SAMPLED = 9999
+  NUM_SAMPLED = 0#9999
   VOCAB_SIZE = 10000  # includes <epsilon>, vocabulary in fst symtable format
 
 
@@ -465,6 +429,22 @@ class PennTaggedHRRWordLevelNF50(PennHRRWordLevelNF50):
 #    p.num_samples = 1006
 #    return p
 
+
+def chunkify(p, cls):
+  p.train.chunk_loss_anneal = 3000.0
+  p.lm.use_chunks = True
+  p.lm.num_sent_roles = 2
+  p.lm.sent_role_anneal_steps = [3000.0]
+  p.lm.num_word_roles = cls.NUM_ROLES
+  #for tpl in p.lm.rnns.cell_tpl:
+  p.lm.rnns.cell_tpl[-1].num_output_nodes = 2 * cls.EMBEDDING_DIM
+  
+  p.lm.pred_proj.input_dim = 2 * cls.EMBEDDING_DIM
+  p.lm.pred_proj.output_dim = cls.EMBEDDING_DIM
+  p.lm.pred_proj.activation = 'TANH'
+  p.lm.pred_proj.batch_norm = False
+  return p
+
 '''
 Full model. Chunk-level HRR. 
 '''
@@ -474,20 +454,8 @@ class PennTaggedHRRChunkLevelNF50(PennTaggedHRRWordLevelNF50):
   @classmethod
   def Task(cls):
     p = super(PennTaggedHRRChunkLevelNF50, cls).Task()
+    p = chunkify(p, cls)
     # TODO(jmluo) need to rename this -- I'm still using chunk loss but there is no r_o prediction.
-    p.train.chunk_loss_anneal = 3000.0
-    p.lm.use_chunks = True
-    p.lm.num_sent_roles = 2
-    p.lm.sent_role_anneal_steps = [3000.0]
-    p.lm.num_word_roles = cls.NUM_ROLES
-    for tpl in p.lm.rnns.cell_tpl:
-      tpl.num_output_nodes = 2 * cls.EMBEDDING_DIM
-    
-    p.lm.pred_proj.input_dim = 2 * cls.EMBEDDING_DIM
-    p.lm.pred_proj.output_dim = cls.EMBEDDING_DIM
-    p.lm.pred_proj.activation = 'TANH'
-    p.lm.pred_proj.batch_norm = False
-
     return p
 
 @model_registry.RegisterSingleTaskModel
@@ -500,18 +468,19 @@ class PennTaggedHRRChunkLevelNF50RNN(PennTaggedHRRChunkLevelNF50):
     
     p.lm.pred_rnn = PennTaggedHRRChunkLevelNF50RNN.get_lm_params(1, 0.5).rnns
     p.lm.pred_rnn.dropout.keep_prob = 0.5
+    iter_iter(p, 'params_init', 0.05)
     return p
 
 @model_registry.RegisterSingleTaskModel
-class PennTaggedHRRChunkLevelNF250RNN(PennTaggedHRRChunkLevelNF50):
-  NUM_FILLERS_PER_ROLE = 250
+class PennTaggedHRRChunkLevelNF320RNN(PennTaggedHRRChunkLevelNF50):
+  NUM_FILLERS_PER_ROLE = 320
 
 @model_registry.RegisterSingleTaskModel
-class PennTaggedHRRChunkLevelNF250RNNFixedBases(PennTaggedHRRChunkLevelNF250RNN):
+class PennTaggedHRRChunkLevelNF320RNNFixedBases(PennTaggedHRRChunkLevelNF320RNN):
 
   @classmethod
   def Task(cls):
-    p = super(PennTaggedHRRChunkLevelNF250RNNFixedBases, cls).Task()
+    p = super(PennTaggedHRRChunkLevelNF320RNNFixedBases, cls).Task()
     p.lm.emb.trainable_basis = False
     p.lm.trainable_basis = False
     p.train.isometric = 0.
@@ -519,13 +488,13 @@ class PennTaggedHRRChunkLevelNF250RNNFixedBases(PennTaggedHRRChunkLevelNF250RNN)
     
 
 @model_registry.RegisterSingleTaskModel
-class PennTaggedHRRChunkLevelNR4NF125RNNFixedBases(PennTaggedHRRChunkLevelNF250RNNFixedBases):
+class PennTaggedHRRChunkLevelNR4NF160RNNFixedBases(PennTaggedHRRChunkLevelNF320RNNFixedBases):
   NUM_FILLERS_PER_ROLE = 125
   NUM_ROLES = 4
   
   @classmethod
   def Task(cls):
-    p = super(PennTaggedHRRChunkLevelNR4NF125RNNFixedBases, cls).Task()
+    p = super(PennTaggedHRRChunkLevelNR4NF160RNNFixedBases, cls).Task()
     p.lm.softmax.role_anneal_steps = [3000, 4000, 5000]
     return p
                                                                                                                                                                                                                                                                                        
