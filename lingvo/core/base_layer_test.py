@@ -36,31 +36,35 @@ def EvalAndFlatten(nmap):
   return nmap.Transform(lambda x: x.eval()).FlattenItems()
 
 
-class LayerBaseTest(tf.test.TestCase):
+class BaseLayerTest(tf.test.TestCase):
 
   def testCopyBaseParams(self):
     # CopyBaseParams should only overwrite is_eval/vn setting when target use
     # default is_eval/vn config.
-    layer_base_p = base_layer.LayerBase.Params()
+    layer_base_p = base_layer.BaseLayer.Params()
     from_param = layer_base_p.Copy()
     to_param = layer_base_p.Copy()
     from_param.is_eval = False
     from_param.vn.global_vn = True
+    from_param.random_seed = 1234
     # Target use default, overwrite.
-    base_layer.LayerBase.CopyBaseParams(from_param, to_param)
+    base_layer.BaseLayer.CopyBaseParams(from_param, to_param)
     self.assertEqual(False, to_param.is_eval)
     self.assertTrue(to_param.vn.global_vn)
+    self.assertEqual(1234, to_param.random_seed)
     to_param = layer_base_p.Copy()
     to_param.is_eval = True
     to_param.vn.per_step_vn = True
+    to_param.random_seed = 4321
     # Target does not use default, should not overwrite.
-    base_layer.LayerBase.CopyBaseParams(from_param, to_param)
+    base_layer.BaseLayer.CopyBaseParams(from_param, to_param)
     self.assertEqual(True, to_param.is_eval)
     self.assertTrue(to_param.vn.per_step_vn)
     self.assertFalse(to_param.vn.global_vn)
+    self.assertEqual(4321, to_param.random_seed)
 
   def testCreateChildren(self):
-    layer_p = base_layer.LayerBase.Params()
+    layer_p = base_layer.BaseLayer.Params()
     layer_p.name = 'test'
     layer = layer_p.cls(layer_p)
     layer.CreateChildren('a', [layer_p, [layer_p, layer_p], layer_p])
@@ -72,7 +76,7 @@ class LayerBaseTest(tf.test.TestCase):
     self.assertEqual(len(layer.theta.a[1]), 2)
 
   def testCreateAccumulator(self):
-    layer_p = base_layer.LayerBase.Params()
+    layer_p = base_layer.BaseLayer.Params()
     layer_p.name = 'test'
     layer = layer_p.cls(layer_p)
     layer.CreateChild('child', layer_p)
@@ -101,7 +105,7 @@ class LayerBaseTest(tf.test.TestCase):
 
   def testGetUpdateAccumulator(self):
     with self.session():
-      layer_p = base_layer.LayerBase.Params()
+      layer_p = base_layer.BaseLayer.Params()
       layer_p.name = 'test'
       layer = layer_p.cls(layer_p)
 
@@ -121,7 +125,7 @@ class LayerBaseTest(tf.test.TestCase):
 
   def testAccumulatorDisableEnable(self):
     with self.session():
-      layer_p = base_layer.LayerBase.Params()
+      layer_p = base_layer.BaseLayer.Params()
       layer_p.name = 'test'
       layer = layer_p.cls(layer_p)
 
@@ -140,7 +144,7 @@ class LayerBaseTest(tf.test.TestCase):
 
   def testGetSetAccumulatorValues(self):
     with self.session():
-      layer_p = base_layer.LayerBase.Params()
+      layer_p = base_layer.BaseLayer.Params()
       layer_p.name = 'test'
       layer1 = layer_p.cls(layer_p)
       layer1.CreateChild('layer1a', layer_p)
@@ -190,7 +194,7 @@ class LayerBaseTest(tf.test.TestCase):
           layer1.layer1b.layer1b1.accumulators.acc3.GetValue().eval())
 
   def testAddFunction(self):
-    layer_p = base_layer.LayerBase.Params()
+    layer_p = base_layer.BaseLayer.Params()
     layer_p.name = 'test'
     layer = layer_p.cls(layer_p)
 
@@ -198,6 +202,32 @@ class LayerBaseTest(tf.test.TestCase):
     with self.assertRaises(AttributeError):
       layer.AddFunction('test1', lambda: 2)
     self.assertEquals(1, layer.fns.test1())
+
+  def testAttributeErrorInPropertyGetter(self):
+
+    class BadLayer(base_layer.BaseLayer):
+
+      @classmethod
+      def Params(cls):
+        return super(BadLayer, cls).Params()
+
+      @base_layer.initializer
+      def __init__(self, params):
+        super(BadLayer, self).__init__(params)
+
+      @property
+      def bad_property(self):
+        raise AttributeError('INTERNAL')
+
+    layer_p = BadLayer.Params()
+    layer_p.name = 'test'
+    layer = layer_p.cls(layer_p)
+
+    with self.assertRaisesRegexp(AttributeError, 'bad_sub_layer'):
+      _ = layer.bad_sub_layer
+
+    with self.assertRaisesRegexp(AttributeError, 'INTERNAL'):
+      _ = layer.bad_property
 
 
 if __name__ == '__main__':

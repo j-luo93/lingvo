@@ -22,17 +22,24 @@ import numpy as np
 
 import tensorflow as tf
 
+from lingvo.core import cluster_factory
 from lingvo.core import plot
 from lingvo.core import py_utils
 
 
+def _ShouldAddSummary():
+  return cluster_factory.Current().add_summary
+
+
 def scalar(params, *args, **kwargs):  # pylint: disable=invalid-name
-  if params.add_summary:
+  del params
+  if _ShouldAddSummary():
     tf.summary.scalar(*args, **kwargs)
 
 
 def histogram(params, *args, **kwargs):  # pylint: disable=invalid-name
-  if params.add_summary:
+  del params
+  if _ShouldAddSummary():
     tf.summary.histogram(*args, **kwargs)
 
 
@@ -43,7 +50,7 @@ def SequenceLength(padding):
     padding: A tensor of binary paddings shaped [batch, seqlen].
 
   Returns:
-    seq_lens: A tensor of shape [batch] containing the non-padded length of each
+    seq_lens, A tensor of shape [batch] containing the non-padded length of each
       element of plot_tensor along the batch dimension.
   """
   seq_lens = tf.cast(tf.reduce_sum(1 - padding, axis=1), tf.int32)
@@ -121,7 +128,7 @@ def AddAttentionSummary(params,
     The added image summary.
   """
   name = attention_tensors[0].name + '/Attention'
-  if not params.add_summary:
+  if not _ShouldAddSummary():
     return tf.summary.scalar('disabled_%s' % name, 0)
   fig = plot.MatplotlibFigureSummary(name, max_outputs=max_outputs)
   src_lens = SequenceLength(tf.transpose(src_paddings))
@@ -151,16 +158,16 @@ def AddNormSummary(params, name, vs_gs):
   Args:
     params: A layer hyperparams.
     name: A name string for summary.
-    vs_gs: A NestedMap or a list of NestedMap of (variable, gradient).
+    vs_gs: A `.NestedMap` or a list of `.NestedMap` of (variable, gradient).
 
   Returns:
     norm of variables, and norm of gradients.
   """
   flatten = py_utils.NestedMap(child=vs_gs).Flatten()
   v_norm = tf.sqrt(py_utils.SumSquared([v for (v, _) in flatten]))
-  scalar(params, 'var_norm_%s' % name, v_norm)
+  scalar(params, 'var_norm/%s' % name, v_norm)
   g_norm = tf.sqrt(py_utils.SumSquared([g for (_, g) in flatten]))
-  scalar(params, 'grad_norm_%s' % name, g_norm)
+  scalar(params, 'grad_norm/%s' % name, g_norm)
   return v_norm, g_norm
 
 
@@ -176,5 +183,8 @@ def CollectVarHistogram(params, vs_gs):
       if isinstance(grad, tf.IndexedSlices):
         var = tf.gather(var, grad.indices)
         grad = grad.values
+      if var.dtype.is_complex:
+        var = tf.abs(var)
+        grad = tf.abs(grad)
       histogram(params, name_prefix + 'var_hist', var)
       histogram(params, name_prefix + 'grad_hist', grad)

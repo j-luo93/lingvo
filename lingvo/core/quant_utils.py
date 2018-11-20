@@ -21,18 +21,16 @@ from __future__ import print_function
 import numpy as np
 import tensorflow as tf
 
-from tensorflow.python.framework import function
-
 from lingvo.core import base_layer
 from lingvo.core import hyperparams
 from lingvo.core import py_utils
 from lingvo.core import summary_utils
 
 
-class QuantizableLayer(base_layer.LayerBase):
+class QuantizableLayer(base_layer.BaseLayer):
   """A layer that supports various forms of quantization.
 
-  It is always safe to extend QuantizableLayer instead of LayerBase (i.e. at
+  It is always safe to extend QuantizableLayer instead of BaseLayer (i.e. at
   the base of layer inheritance hierarchies) if any layer in the hierarchy
   may be quantized. Unless if configured/used, all quantization behavior
   is disabled by default.
@@ -41,12 +39,14 @@ class QuantizableLayer(base_layer.LayerBase):
   "fake quantization" category, where we add various constraints in the
   forward propagation to quantify and simulate the effect of quantization.
   Within that, we have two major approaches:
+
     - Active clipping: Usually via a schedule, tensors are actively
       clipped to fall into ranges that we know apriori that the model should
       be able to deal with.
     - Passive tracking and simulation: Passively track the min/max ranges
       of tensors and insert special ops at training and eval time that
       constrain to those ranges.
+
   The tensors of interest for both approaches are top-level inputs (or
   embeddings), outputs of arithmetic operations (add, mul, tanh, etc) and
   weights. While the actual process of quantizing can be quite complex and
@@ -58,19 +58,20 @@ class QuantizableLayer(base_layer.LayerBase):
   type system but given the loose typing, it is just an honor system).
 
   The "decorators" are:
-    - QWeight: Tags a tensor (typically a var) as a weight quantized type.
-    - QR* (QRTanh, QRSigmoid, QRSoftmax, etc): Tags a tensor as the result
-      of a fixed activation function with a known output range (the range
-      is implied in the name).
-    - QRPadding: Tags a tensor as containing a padding value (as we define
-      them as 0..1). While such values are numeric, they generally exist with
-      very different ranges from the rest of the graph and should not be
-      arithmetically combined with tensors that may have a different/variable
-      range.
-    - QTensor: Tags a tensor as a generic quantized intermediate value.
-      These are also tagged with a layer-unique name. All QTensors with the
-      same name will be considered the same from a numerical range/precision
-      perspective.
+
+  - QWeight: Tags a tensor (typically a var) as a weight quantized type.
+  - QR* (QRTanh, QRSigmoid, QRSoftmax, etc): Tags a tensor as the result
+    of a fixed activation function with a known output range (the range
+    is implied in the name).
+  - QRPadding: Tags a tensor as containing a padding value (as we define
+    them as 0..1). While such values are numeric, they generally exist with
+    very different ranges from the rest of the graph and should not be
+    arithmetically combined with tensors that may have a different/variable
+    range.
+  - QTensor: Tags a tensor as a generic quantized intermediate value.
+    These are also tagged with a layer-unique name. All QTensors with the
+    same name will be considered the same from a numerical range/precision
+    perspective.
 
   Tagging things in this way allows us to, via hyperparameters, associate
   one or more quantization domains (QDomain) with the layer that will
@@ -87,30 +88,34 @@ class QuantizableLayer(base_layer.LayerBase):
   RNN cell that uses 8bit quantization for inputs/outputs and 16bit
   quantization for internal state arithmetic). Such uses should be rare.
 
-  Convenience functions:
-  ----------------------
+
+  **Convenience functions:**
+
   The layer adds a number of convenience functions to the layer's 'fns'
   function library. These mirror similarly named functions in TensorFlow but
   automatically add the necessary annotations. All such functions take the
   following named parameters:
-    qt: Name of the QTensor (setup with TrackQTensor) for dynamic range
-        tracking.
-    qmin/qmax/qdomain: Constant min/max range plus optional QDomain name to
-        resolve against. Typically, only qmin/qmax are used.
+
+    - qt: Name of QTensor (setup with TrackQTensor) for dynamic range tracking.
+    - qmin/qmax/qdomain: Constant min/max range plus optional QDomain name to
+      resolve against. Typically, only qmin/qmax are used.
+
   Functions that have a natural output range will have default values for
   qmin/qmax so that they just work. Functions that do not have a natural
   output range must have either qt or qmin/qmax specified manually.
 
-  Natural range functions:
-    qtanh
-    qsigmoid
-    qsoftmax
+  Natural range functions
+
+  - qtanh
+  - qsigmoid
+  - qsoftmax
 
   Dynamic range functions:
-    qadd
-    qmultiply
-    qmatmul (defers to py_utils.Matmul and only accepts rank-2 tensors)
-    qbatchmatmul (defers to tf.matmul directly)
+
+  - qadd
+  - qmultiply
+  - qmatmul (defers to `.py_utils.Matmul` and only accepts rank-2 tensors)
+  - qbatchmatmul (defers to `tf.matmul` directly)
   """
 
   @classmethod
@@ -175,7 +180,7 @@ class QuantizableLayer(base_layer.LayerBase):
     return qd.QuantizeConstantRange(t, 0.0, 1.0) if qd else t
 
   def TrackQTensor(self, *t_names, **kwargs):
-    """Creates one or more QTensors for later use.
+    r"""Creates one or more QTensors for later use.
 
     Any tensor that will later be quantized must be created first, preferably
     in __init__.
@@ -185,14 +190,13 @@ class QuantizableLayer(base_layer.LayerBase):
     domain (QDomain), typically 'default'. However, additional QDomains can
     be defined as parameters to control fine grained aspects of quantization.
 
-    If no explicit domain is passed, then the domain ('tensor_' + t_name) is
+    If no explicit domain is passed, then the domain ('tensor\_' + t_name) is
     tried. If that is not defined, then 'default'.
 
     Args:
-      *t_names: Positional parameters are taken to be QTensor names to
-          create.
+      *t_names: Positional parameters are taken to be QTensor names to create.
       **kwargs: Can contain an explicit 'domain'. Written this way due to
-          python2 limitations.
+        python2 limitations.
     """
     domain_override = kwargs['domain'] if 'domain' in kwargs else None
     for t_name in t_names:
@@ -242,6 +246,22 @@ class QuantizableLayer(base_layer.LayerBase):
     if not qd:
       return ts
     return qd.QuantizeTensors(t_name, ts, eval_only=eval_only)
+
+  def GetQTensorRange(self, t_name, ts):
+    """Returns the range for a quantized tensor.
+
+    t_name must have been previously create via TrackQTensor and t should be
+    previously quantized.
+
+    Args:
+      t_name: Preivously created QTensor t_name to fetch range from.
+      t: Tensor to retrieve range from.
+
+    Returns:
+      The (min, max) range of the quantized tensor.
+    """
+    qd = self._tracked_tensors[t_name]
+    return qd.GetTensorRange(t_name, ts)
 
   def QWeight(self, w, domain='weight'):
     """Quantizes a weight.
@@ -318,6 +338,7 @@ class QuantizableLayer(base_layer.LayerBase):
 
     # Supported quantized functions.
     WrapOp('qadd', tf.add)
+    WrapOp('qsubtract', tf.subtract)
     WrapOp('qmultiply', tf.multiply)
     WrapOp('qmatmul', py_utils.Matmul)
     WrapOp('qbatchmatmul', tf.matmul)
@@ -332,7 +353,7 @@ class QuantizableLayer(base_layer.LayerBase):
     self.AddFunction('qweight', self.QWeight)
 
 
-class BaseClippingCapSchedule(base_layer.LayerBase):
+class BaseClippingCapSchedule(base_layer.BaseLayer):
   """Base class for clipping cap schedules."""
 
   @base_layer.initializer
@@ -495,7 +516,7 @@ class LinearClippingCapSchedule(BaseClippingCapSchedule):
     Returns:
       Clipped (or identity) x.
     """
-    cap = state
+    cap = tf.cast(state, x.dtype)
     return tf.clip_by_value(x, -cap, cap)
 
   def GetEndRange(self):
@@ -576,9 +597,6 @@ class FakeQuantizationSchedule(BaseClippingCapSchedule):
     assert p.quant_start_step >= p.clip_end_step, (
         'quant_start_step must be >= clip_end_step')
     if not p.is_inference:
-      with tf.name_scope(p.name):
-        self._DefineFunctions()
-
       clip_ratio_pc = py_utils.WeightParams(
           shape=[],
           init=py_utils.WeightInit.Constant(-1.0
@@ -593,14 +611,6 @@ class FakeQuantizationSchedule(BaseClippingCapSchedule):
           dtype=tf.float32,
           collections=[self.__class__.__name__ + '_vars'])
       self.CreateVariable('fq_ratio', fq_ratio_pc, trainable=False)
-
-  def _DefineFunctions(self):
-    # FIXME: fake_quant gradient in Defun.
-    # num_bits is an attr, not an input, so we need to hard-code the variants.
-    # We only support 8/16 now, so that's what we do.
-    dtype = self.params.dtype
-    self._fake_quant_with_min_max_vars = _DefineFakeQuantWithMinMaxVarsBits(
-        dtype)
 
   @property
   def is_quantized(self):
@@ -644,7 +654,7 @@ class FakeQuantizationSchedule(BaseClippingCapSchedule):
     return self._GetQuantizedRangeForCap(end_cap, bits)
 
   def ApplyConstantClip(self, x, min_value, max_value):
-    return self._fake_quant_with_min_max_vars(
+    return tf.quantization.fake_quant_with_min_max_vars(
         x, min_value, max_value, num_bits=self.params.bits)
 
   def GetState(self, theta):
@@ -733,7 +743,7 @@ class FakeQuantizationSchedule(BaseClippingCapSchedule):
       # if the min/max aren't constant.
       return _CopyShape(
           x,
-          tf.fake_quant_with_min_max_args(
+          tf.quantization.fake_quant_with_min_max_args(
               x, min_value, max_value, num_bits=bits))
 
     # Non-inference.
@@ -752,7 +762,7 @@ class FakeQuantizationSchedule(BaseClippingCapSchedule):
                                                     bits)
       min_value = tf.stop_gradient(min_value)
       max_value = tf.stop_gradient(max_value)
-      return self._fake_quant_with_min_max_vars(
+      return tf.quantization.fake_quant_with_min_max_vars(
           x, min_value, max_value, num_bits=bits)
 
     # Quantization will implicitly clip, so if we are in the quant phase, just
@@ -788,11 +798,43 @@ class FakeQuantizationSchedule(BaseClippingCapSchedule):
         self.vars.fq_ratio.assign(new_fq_ratio))
 
 
-class QDomain(base_layer.LayerBase):
+class QDomain(base_layer.BaseLayer):
   """Base class for a quantization domain layer.
 
   This implementation doubles as a no-op quantization domain.
   """
+
+  @base_layer.initializer
+  def __init__(self, params):
+    super(QDomain, self).__init__(params)
+    self._global_step_enabled = False
+
+  def _EnableGlobalStepAccess(self):
+    """Called by subclass init to initialize the global step counter.
+
+    Should be called from __init__ in an appropriate variable scope. Will add
+    a 'global_step' variable to the layer and a post step update to manage
+    it.
+    """
+    if self._global_step_enabled:
+      return
+    self._global_step_enabled = True
+    global_step_pc = py_utils.WeightParams(
+        shape=[],
+        init=py_utils.WeightInit.Constant(0),
+        dtype=tf.int64,
+        collections=[self.__class__.__name__ + '_vars'])
+    self.CreateVariable('global_step', global_step_pc, trainable=False)
+
+  def PostTrainingStepUpdate(self, global_step):
+    """Update the cap value."""
+    super_op = super(QDomain, self).PostTrainingStepUpdate(global_step)
+    if not self._global_step_enabled:
+      return super_op
+    return tf.group([
+        super_op,
+        self.vars.global_step.assign(global_step),
+    ])
 
   def QuantizeWeight(self, w):
     """Quantizes a weight.
@@ -853,6 +895,22 @@ class QDomain(base_layer.LayerBase):
       Quantized tensors.
     """
     return ts
+
+  def GetTensorRange(self, t_name, ts):
+    """Retrieves the range of a tensor given the t_name used by CreateTensor.
+
+    Note, this computes the batch range across the list of tensors at training
+    time but fetches the stored tensor over time. This depends on
+    QuantizeTensors updating the appropriate value.
+
+    Args:
+      t_name: Tensor name.
+      ts: Tensor to determine the range for.
+
+    Returns:
+      A min-max pair that represents the tensor range.
+    """
+    raise NotImplementedError('Abstract method: NormalizeTensors')
 
 
 class SymetricScheduledClipQDomain(QDomain):
@@ -950,6 +1008,15 @@ class PassiveAsymQDomain(QDomain):
              'Default minimum value (so initial graphs are valid).')
     p.Define('default_max', 1.0,
              'Default maximum value (so initial graphs are valid).')
+    p.Define('quantize_weight_epsilon', 0.0,
+             'Default epsilon for weight quantization to prevent zero range.')
+    p.Define(
+        'delay_start_steps', 0,
+        'Delays applying quantization at training time until after '
+        'this many steps. 0 = start immediately. -1 = start never. '
+        'This is often needed to allow the model to reach some level '
+        'of convergence prior to applying quantization. Only affects '
+        'training (not eval/inference).')
     return p
 
   @base_layer.initializer
@@ -960,29 +1027,36 @@ class PassiveAsymQDomain(QDomain):
     self._t_names = set()  # set of known t_name (from CreateTensor)
     self._qvars = py_utils.NestedMap()  # var_name -> tf.Variable
 
-    # FIXME: fake_quant gradient in Defun.
-    # There is an issue with how the gradient is setup for tf.fake_quant* that
-    # makes it fail if used from within a Defun for backprop. For training/eval,
-    # wrap it in a special Defun with a manually defined gradient until this can
-    # be fixed. Inference tools expect to find the not wrapped fake_quant*, so
-    # special case it back to usual.
-    if p.is_inference:
-      self._fake_quant_with_min_max_vars = tf.fake_quant_with_min_max_vars
-    else:
-      self._fake_quant_with_min_max_vars = _DefineFakeQuantWithMinMaxVarsBits(
-          p.dtype)
-
     # Save a scope for lazily created variables.
     with tf.variable_scope(p.name + '/q'):
+      if p.delay_start_steps > 0:
+        self._EnableGlobalStepAccess()
       self._qvars_scope = tf.get_variable_scope()
+
+  def _MaybeFakeQuant(self, inputs, min_v, max_v, num_bits):
+    p = self.params
+
+    def Apply():
+      return tf.quantization.fake_quant_with_min_max_vars(
+          inputs, min_v, max_v, num_bits=num_bits)
+
+    if p.delay_start_steps != 0 and not p.is_eval:
+      if p.delay_start_steps == -1:
+        return inputs
+      return tf.where(self.theta.global_step >= p.delay_start_steps, Apply(),
+                      inputs)
+    else:
+      return Apply()
 
   def QuantizeWeight(self, w):
     p = self.params
     w_min = tf.reduce_min(w)
-    w_min = tf.minimum(w_min, 0.0)
     w_max = tf.reduce_max(w)
-    w_max = tf.maximum(w_max, 0.0)
-    quant_w = self._FakeQuantWithMinMaxVars(w, w_min, w_max, num_bits=p.bits)
+    # NOTE: We force a small, non-zero range because otherwise, zero weights
+    # can cause downstream inference engines to blow up.
+    w_min = tf.minimum(w_min, -p.quantize_weight_epsilon)
+    w_max = tf.maximum(w_max, p.quantize_weight_epsilon)
+    quant_w = self._MaybeFakeQuant(w, w_min, w_max, num_bits=p.bits)
     if p.is_eval:
       return quant_w
     else:
@@ -995,13 +1069,11 @@ class PassiveAsymQDomain(QDomain):
 
   def QuantizeNaturalRange(self, t, min_value, max_value):
     p = self.params
-    return self._FakeQuantWithMinMaxVars(
-        t, min_value, max_value, num_bits=p.bits)
+    return self._MaybeFakeQuant(t, min_value, max_value, num_bits=p.bits)
 
   def QuantizeConstantRange(self, t, min_value, max_value):
     p = self.params
-    return self._FakeQuantWithMinMaxVars(
-        t, min_value, max_value, num_bits=p.bits)
+    return self._MaybeFakeQuant(t, min_value, max_value, num_bits=p.bits)
 
   def CreateTensor(self, t_name):
     p = self.params
@@ -1033,8 +1105,7 @@ class PassiveAsymQDomain(QDomain):
       min_var = self._GetQStateVar(t_name, 'min')
       max_var = self._GetQStateVar(t_name, 'max')
       return [
-          self._FakeQuantWithMinMaxVars(t, min_var, max_var, num_bits=p.bits)
-          for t in ts
+          self._MaybeFakeQuant(t, min_var, max_var, num_bits=p.bits) for t in ts
       ]
     else:
       # At training time, use the batch calculated min/max.
@@ -1062,7 +1133,7 @@ class PassiveAsymQDomain(QDomain):
           # NANs. Sometimes early in the training process, things are unstable
           # and ranges can produce numerical instability that makes it
           # impossible to perform a fake_quant.
-          quant_t = self._FakeQuantWithMinMaxVars(
+          quant_t = self._MaybeFakeQuant(
               t, batch_min, batch_max, num_bits=p.bits)
           # TODO(laurenzo): Plumb quant_t_has_nans through state and report.
           quant_t_has_nans = tf.is_nan(quant_t)
@@ -1071,6 +1142,21 @@ class PassiveAsymQDomain(QDomain):
         summary_utils.histogram(
             self.params, '%s/%s_%d' % (self._qvars_scope.name, t_name, i), t)
       return ts_out
+
+  def GetTensorRange(self, t_name, ts):
+    p = self.params
+    # Always straddle a real zero point.
+    if p.is_eval:
+      # At eval/inference time, use the memorized range.
+      # Important: Don't capture these variables in training mode so as to
+      # avoid extra/unnecessary captures.
+      min_var = tf.stop_gradient(self._GetQStateVar(t_name, 'min'))
+      max_var = tf.stop_gradient(self._GetQStateVar(t_name, 'max'))
+      return (min_var, max_var)
+    # Calculate min/max for all tensors.
+    batch_min = tf.minimum(tf.reduce_min(ts), 0.0)
+    batch_max = tf.maximum(tf.reduce_max(ts), 0.0)
+    return (tf.stop_gradient(batch_min), tf.stop_gradient(batch_max))
 
   def PostTrainingStepUpdate(self, global_step):
     ops = [super(PassiveAsymQDomain, self).PostTrainingStepUpdate(global_step)]
@@ -1104,13 +1190,6 @@ class PassiveAsymQDomain(QDomain):
     summary_utils.scalar(self.params, summary_name_min, min_var)
     summary_utils.scalar(self.params, summary_name_max, max_var)
 
-  def _FakeQuantWithMinMaxVars(self, x, min_value, max_value, num_bits=8):
-    """The FakeQuant* op is problematic. This version works."""
-    shape = x.get_shape()
-    y = self._fake_quant_with_min_max_vars(x, min_value, max_value, num_bits)
-    y.set_shape(shape)
-    return y
-
   def _RecordTensor(self, t_name):
     p = self.params
     if p.is_eval:
@@ -1131,11 +1210,21 @@ class PassiveAsymQDomain(QDomain):
     def Ema(variable, value):
       return (1.0 - p.ema_decay) * (variable - value)
 
+    # Note that small floating point issues can cause ranges that naturally
+    # begin or end at zero to move slightly past, causing hard failures
+    # downstream (checks that all ranges straddle zero). We therefore repeat
+    # the straddling constraint here.
     return [
-        tf.assign_sub(min_var,
-                      tf.where(count > 0.0, Ema(min_var, min_value), 0.0)),
-        tf.assign_sub(max_var,
-                      tf.where(count > 0.0, Ema(max_var, max_value), 0.0))
+        tf.assign(
+            min_var,
+            tf.minimum(
+                0.,
+                min_var - tf.where(count > 0., Ema(min_var, min_value), 0.))),
+        tf.assign(
+            max_var,
+            tf.maximum(
+                0.,
+                max_var - tf.where(count > 0., Ema(max_var, max_value), 0.))),
     ]
 
 
@@ -1143,55 +1232,3 @@ def _CopyShape(from_t, to_t):
   if isinstance(from_t, tf.Tensor) and isinstance(to_t, tf.Tensor):
     to_t.set_shape(from_t.shape)
   return to_t
-
-
-# pylint: disable=invalid-name
-# FIXME: fake_quant gradient in Defun
-def _DefineFakeQuantWithMinMaxVars(dtype, bits):
-  """Defines a FakeQuantWithMinMaxVars defun.
-
-  This is currently necessary because the fake_quant* op does
-  not define its gradient function properly.
-
-  Args:
-    dtype: Tensorflow dtype.
-    bits: The num_bits to use for these definitions.
-  Returns:
-    FakeQuantWithMinMaxVars(x, min_value, max_value) function.
-  """
-
-  @function.Defun(dtype, dtype, dtype, dtype)
-  def FakeQuantGradient(x, min_value, max_value, dy):
-    return tf.fake_quant_with_min_max_vars_gradient(
-        dy, x, min_value, max_value, num_bits=bits)
-
-  @function.Defun(dtype, dtype, dtype, grad_func=FakeQuantGradient)
-  def FakeQuantWithMinMaxVars(x, min_value, max_value):
-    return tf.fake_quant_with_min_max_vars(
-        x, min_value, max_value, num_bits=bits)
-
-  return FakeQuantWithMinMaxVars
-
-
-def _DefineFakeQuantWithMinMaxVarsBits(dtype):
-  """Defines a FakeQuantWithMinMaxVars that can have num_bits parameterized.
-
-  Args:
-    dtype: Tensorflow dtype.
-  Returns:
-    FakeQuantWithMinMaxVars(x, min_value, max_value, num_bits)
-  """
-  FakeQuantWithMinMaxVars8 = _DefineFakeQuantWithMinMaxVars(dtype, 8)
-  FakeQuantWithMinMaxVars16 = _DefineFakeQuantWithMinMaxVars(dtype, 16)
-
-  # And the python level switcher.
-  def FakeQuantWithMinMaxVars(x, min_value, max_value, num_bits):
-    if num_bits == 8:
-      return FakeQuantWithMinMaxVars8(x, min_value, max_value)
-    elif num_bits == 16:
-      return FakeQuantWithMinMaxVars16(x, min_value, max_value)
-    else:
-      raise ValueError('FakeQuantWithMinMaxVars only supports 8/16 bits')
-
-  return FakeQuantWithMinMaxVars
-# pylint: enable=invalid-name

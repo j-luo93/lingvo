@@ -74,27 +74,6 @@ bool IsDuplicateHyp(const Hyp& cur_hyp, const Hyp& other_hyp,
   }
 }
 
-bool IsDuplicateHypothesis(const Hypothesis& cur_hyp,
-                           const Hypothesis& other_hyp, const int epsilon_id) {
-  std::vector<int32> cur_hyp_word_ids;
-  std::vector<int32> other_hyp_word_ids;
-  for (int id : cur_hyp.ids()) {
-    if (id != epsilon_id) {
-      cur_hyp_word_ids.push_back(id);
-    }
-  }
-  for (int id : other_hyp.ids()) {
-    if (id != epsilon_id) {
-      other_hyp_word_ids.push_back(id);
-    }
-  }
-  if (cur_hyp_word_ids.size() != other_hyp_word_ids.size()) {
-    return false;
-  }
-  return std::equal(cur_hyp_word_ids.begin(), cur_hyp_word_ids.end(),
-                    other_hyp_word_ids.begin());
-}
-
 float LogSumExp(float a, float b) {
   const float m = std::max(a, b);
   return m + log(exp(a - m) + exp(b - m));
@@ -125,11 +104,10 @@ void ComputeTopKPlusM(const std::vector<Hyp>& hyps, const Tensor& scores,
                       const int32 k, const int32 m, const int32 eos_id,
                       const int32 eoc_id, const int32 num_beams,
                       const float valid_eos_max_logit_delta,
-                      const float lm_weight, const Tensor& lm_log_probs,
                       bool is_first_step, const Tensor& is_last_chunk,
-                      bool merge_paths, std::vector<bool>* eos_in_topk,
-                      std::vector<Hyp>* top_k, std::vector<Hyp>* extra_m,
-                      std::vector<Hyp>* eos_hyps,
+                      bool merge_paths, bool allow_empty_terminated_hyp,
+                      std::vector<bool>* eos_in_topk, std::vector<Hyp>* top_k,
+                      std::vector<Hyp>* extra_m, std::vector<Hyp>* eos_hyps,
                       std::vector<int32>* terminal_syms) {
   VLOG(1) << "Topk clear, num_beams: " << num_beams;
   CHECK_EQ(hyps.size(), num_beams * k);
@@ -185,19 +163,13 @@ void ComputeTopKPlusM(const std::vector<Hyp>& hyps, const Tensor& scores,
             if (!all_less_than(&scores_matrix(hyp_id, id),
                                bottom_of_topk - current_global_score)) {
               for (int i = 0; i < STRIDE; ++i) {
-                float lm_score = 0;
-                if (lm_weight != 0) {
-                  auto lm_local_score = lm_log_probs.matrix<float>();
-                  lm_score = lm_weight * lm_local_score(hyp_id, id + i);
-                }
                 const float score = scores_matrix(hyp_id, id + i);
                 const float global_score =
-                    current_global_score + score + lm_score;
+                    current_global_score + score;
                 if (global_score >= bottom_of_topk) {
                   bottom_of_topk =
                       topk.Add({hyps[hyp_id].beam_id, hyp_id, id + i, score,
-                                global_score, hyps[hyp_id].prev_ids,
-                                lm_score});
+                                global_score, hyps[hyp_id].prev_ids});
                 }
               }
             }
@@ -205,17 +177,12 @@ void ComputeTopKPlusM(const std::vector<Hyp>& hyps, const Tensor& scores,
       // Non-AVX code below handles the remaining elements.
 #endif
           for (; id != num_ids; ++id) {
-            float lm_score = 0;
-            if (lm_weight != 0) {
-              auto lm_local_score = lm_log_probs.matrix<float>();
-              lm_score = lm_weight * lm_local_score(hyp_id, id);
-            }
             const float score = scores_matrix(hyp_id, id);
-            const float global_score = current_global_score + score + lm_score;
+            const float global_score = current_global_score + score;
             if (global_score >= bottom_of_topk)
               bottom_of_topk =
                   topk.Add({hyps[hyp_id].beam_id, hyp_id, id, score,
-                            global_score, hyps[hyp_id].prev_ids, lm_score});
+                            global_score, hyps[hyp_id].prev_ids});
           }
 
           auto entries = topk.Get();
@@ -245,7 +212,11 @@ void ComputeTopKPlusM(const std::vector<Hyp>& hyps, const Tensor& scores,
                 // hypothesis, even though <eos> was not predicted, and
                 // indicate that the final symbol for the hypothesis is
                 // <epsilon>, not <eos>.
-                if (e.global_score > eos_score_threshold) {
+                if (e.global_score > eos_score_threshold &&
+                    // Only allow an empty hyp (all <epsilon>s) to be
+                    // considered terminated, if explicitly permitted.
+                    // 'prev_ids' contains only non-epsilons.
+                    (allow_empty_terminated_hyp || !e.prev_ids.empty())) {
                   (*eos_in_topk)[hyp_id] = true;
                   (*eos_hyps)[hyp_id] = e;
                   (*terminal_syms)[hyp_id] = eoc_id;
@@ -284,8 +255,10 @@ class BeamSearchStepOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("num_hyps_per_beam", &num_hyps_per_beam_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("valid_eos_max_logit_delta",
                                      &valid_eos_max_logit_delta_));
-    OP_REQUIRES_OK(ctx, ctx->GetAttr("lm_weight", &lm_weight_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("merge_paths", &merge_paths_));
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("allow_empty_terminated_hyp",
+                                     &allow_empty_terminated_hyp_));
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("ensure_full_beam", &ensure_full_beam_));
 
     CHECK_GE(eos_id_, 0);
     CHECK_GT(beam_size_, 0.0);
@@ -375,7 +348,6 @@ class BeamSearchStepOp : public OpKernel {
     const Tensor& in_atten_probs = ctx->input(8);
     const Tensor& is_last_chunk = ctx->input(9);
     const Tensor& cur_step = ctx->input(10);
-    const Tensor& lm_log_probs = ctx->input(11);
 
     OP_REQUIRES(
         ctx, scores.dims() == 2,
@@ -511,25 +483,6 @@ class BeamSearchStepOp : public OpKernel {
             "atten_probs.dim_size(1) == in_atten_probs.dim_size(2). Got ",
             atten_probs.dim_size(1), " and ", in_atten_probs.dim_size(2)));
 
-    if (lm_weight_ != 0) {
-      OP_REQUIRES(
-          ctx, lm_log_probs.dims() == 2,
-          errors::InvalidArgument("LM probs failed tensor shape sanity "
-                                  "check. lm_log_probs.dims() == 2. Got ",
-                                  lm_log_probs.dims()));
-      OP_REQUIRES(ctx, lm_log_probs.dim_size(0) == scores.dim_size(0),
-                  errors::InvalidArgument("LM probs failed tensor shape sanity "
-                                          "check. lm_log_probs.dim_size(0) == "
-                                          "scores.dim_size(0). Got ",
-                                          lm_log_probs.dim_size(0), " and ",
-                                          scores.dim_size(0)));
-      OP_REQUIRES(ctx, lm_log_probs.dim_size(1) == scores.dim_size(1),
-                  errors::InvalidArgument("LM probs failed tensor shape sanity "
-                                          "check. lm_log_probs.dim_size(1) == "
-                                          "scores.dim_size(1). Got ",
-                                          lm_log_probs.dim_size(1), " and ",
-                                          scores.dim_size(1)));
-    }
     if (merge_paths_) {
       OP_REQUIRES(
           ctx, eoc_id_ >= 0,
@@ -573,8 +526,8 @@ class BeamSearchStepOp : public OpKernel {
     std::vector<bool> eos_in_topk;
     std::vector<int32> terminal_syms;
     ComputeTopKPlusM(hyps, scores, num_hyps_per_beam_, 0, eos_id_, eoc_id_,
-                     num_beams, valid_eos_max_logit_delta_, lm_weight_,
-                     lm_log_probs, t == 0, is_last_chunk, merge_paths_,
+                     num_beams, valid_eos_max_logit_delta_, t == 0,
+                     is_last_chunk, merge_paths_, allow_empty_terminated_hyp_,
                      &eos_in_topk, &top_k_hyps, &extra_m_hyps, &eos_hyps,
                      &terminal_syms);
 
@@ -634,6 +587,29 @@ class BeamSearchStepOp : public OpKernel {
 
     // Now check for all_done
     t_all_done() = true;
+    if (ensure_full_beam_) {
+      // First check how many EOS hyps we have.  If we have fewer than
+      // num_hyps_per_beam for any beam, we are NOT done.
+      for (int beam_id = 0; beam_id < num_beams; ++beam_id) {
+        int num_done_hyps = 0;
+        for (int index_in_beam = 0; index_in_beam < num_hyps_per_beam_;
+             ++index_in_beam) {
+          for (int time_step = 0; time_step < t; ++time_step) {
+            int index = beam_id * num_hyps_per_beam_ + index_in_beam;;
+            if (!t_out_done_hyps(time_step, index).empty()) {
+              ++num_done_hyps;
+            }
+          }
+        }
+        if (num_done_hyps < num_hyps_per_beam_) {
+          t_all_done() = false;
+          break;
+        }
+      }
+      if (t_all_done() == false) return;
+    }
+    // Now check for hyp quality.  If for any beam we still have hyps within
+    // 'beam_size' of best score, we are NOT done.
     for (int i = 0; i < num_hyps; ++i) {
       const Hyp& hyp = top_k_hyps[i];
       const int beam_id = hyp.beam_id;
@@ -654,8 +630,9 @@ class BeamSearchStepOp : public OpKernel {
   float beam_size_ = 0.0;
   int num_hyps_per_beam_ = 0;
   float valid_eos_max_logit_delta_ = 0.0;
-  float lm_weight_ = 0.0;
   bool merge_paths_ = false;
+  bool allow_empty_terminated_hyp_ = true;
+  bool ensure_full_beam_ = false;
 };
 
 REGISTER_KERNEL_BUILDER(Name("BeamSearchStep").Device(DEVICE_CPU),
@@ -671,6 +648,7 @@ class TopKTerminatedHypsOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("coverage_penalty", &coverage_penalty_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("target_seq_length_ratio",
                                      &target_seq_length_ratio_));
+    // TODO(anjuli): Remove eoc_id_ which is no longer used.
     OP_REQUIRES_OK(ctx, ctx->GetAttr("eoc_id", &eoc_id_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("merge_paths", &merge_paths_));
     CHECK_GE(length_normalization_, 0.0);
@@ -688,13 +666,13 @@ class TopKTerminatedHypsOp : public OpKernel {
     int num_steps = in_done_hyps.dim_size(0);
     static thread::ThreadPool* workers = new thread::ThreadPool(
         Env::Default(), "topk_terminated_hyps", kNumWorkers);
-    const int epsilon_id_for_path_merging = merge_paths_ ? eoc_id_ : -1;
-    std::vector<TopK<Hypothesis, BetterTerminatedHyp, ExtractNormalizedScore,
-                     InsertHypothesisWithEpsilonDedupe>>
+    // No Insert struct is provided, so we use DefaultInsert, which inserts
+    // without deduping.  No deduping is necessary here because we dedupe
+    // partial hyps at each step of beam search.
+    std::vector<TopK<Hypothesis, BetterTerminatedHyp, ExtractNormalizedScore>>
         topk_vec(num_beams,
-                 TopK<Hypothesis, BetterTerminatedHyp, ExtractNormalizedScore,
-                      InsertHypothesisWithEpsilonDedupe>(
-                     k, epsilon_id_for_path_merging));
+                 TopK<Hypothesis, BetterTerminatedHyp, ExtractNormalizedScore>(
+                     k, /* unused epsilon id */ -1));
     // Each mutex is used to protect corresponding topk_vec.
     std::vector<mutex> mu_vec(num_beams);
     auto t_done_hyps = in_done_hyps.matrix<string>();
@@ -704,9 +682,8 @@ class TopKTerminatedHypsOp : public OpKernel {
             Hypothesis hypothesis;
             for (int32 hyp_id = start; hyp_id < limit; ++hyp_id) {
               // The topk for this beam.
-              TopK<Hypothesis, BetterTerminatedHyp, ExtractNormalizedScore,
-                   InsertHypothesisWithEpsilonDedupe>* topk =
-                  &topk_vec[hyp_id % num_beams];
+              TopK<Hypothesis, BetterTerminatedHyp, ExtractNormalizedScore>*
+                  topk = &topk_vec[hyp_id % num_beams];
               for (int32 step_id = 0; step_id < num_steps; ++step_id) {
                 const string& str_hyps = t_done_hyps(step_id, hyp_id);
                 if (!str_hyps.empty()) {
@@ -746,10 +723,21 @@ class TopKTerminatedHypsOp : public OpKernel {
     Tensor cumulative_atten_prob(DT_FLOAT, {src_size});
     cumulative_atten_prob.flat<float>().setZero();
     for (int step = 0; step < hypothesis.atten_vecs_size(); ++step) {
+      const int hyp_prob_size = hypothesis.atten_vecs(step).prob_size();
       for (int src_id = 0; src_id < src_size; ++src_id) {
-        CHECK_LE(src_size, hypothesis.atten_vecs(step).prob_size());
-        cumulative_atten_prob.flat<float>()(src_id) +=
-            hypothesis.atten_vecs(step).prob(src_id);
+        if (src_id < hyp_prob_size) {
+          cumulative_atten_prob.flat<float>()(src_id) +=
+              hypothesis.atten_vecs(step).prob(src_id);
+        } else {
+          // This can happen e.g. for RNNT model. Here we simply assume
+          // atten_prob for those source positions are 0.0
+          VLOG(1) << "Missing atten_prob for source position "
+                  << src_id
+                  << ". Total available positions are "
+                  << hyp_prob_size
+                  << ".";
+          cumulative_atten_prob.flat<float>()(src_id) += 0.0;
+        }
       }
     }
     // Coverage is capped at 0.5 so that so long as a word is
@@ -860,6 +848,7 @@ class UnpackHypOp : public OpKernel {
 
 REGISTER_KERNEL_BUILDER(Name("UnpackHyp").Device(DEVICE_CPU), UnpackHypOp);
 
+template <typename T>
 class HypsFromBeamSearchOuts : public OpKernel {
  public:
   explicit HypsFromBeamSearchOuts(OpKernelConstruction* ctx) : OpKernel(ctx) {
@@ -952,10 +941,10 @@ class HypsFromBeamSearchOuts : public OpKernel {
     auto t_hyps = hyps.matrix<int>();
     auto t_prev_hyps = prev_hyps.matrix<int>();
     auto t_done_hyps = done_hyps.matrix<bool>();
-    auto t_scores = scores.matrix<float>();
-    auto t_atten_probs = atten_probs.tensor<float, 3>();
-    auto t_eos_scores = eos_scores.matrix<float>();
-    auto t_eos_atten_probs = eos_atten_probs.tensor<float, 3>();
+    auto t_scores = scores.matrix<T>();
+    auto t_atten_probs = atten_probs.tensor<T, 3>();
+    auto t_eos_scores = eos_scores.matrix<T>();
+    auto t_eos_atten_probs = eos_atten_probs.tensor<T, 3>();
     const int seq_length = hyps.dim_size(0);
     const int num_hyps = hyps.dim_size(1);
 
@@ -971,7 +960,7 @@ class HypsFromBeamSearchOuts : public OpKernel {
         kNumWorkers, workers, num_hyps, seq_length * seq_length,
         [&](int64 start, int64 end) {
           std::vector<int> hyp_token_ids;
-          std::vector<float> hyp_local_scores;
+          std::vector<T> hyp_local_scores;
           std::vector<int> hyp_ids;
           Hypothesis terminated_hyps;
           const int num_beams = (num_hyps / num_hyps_per_beam_);
@@ -1001,16 +990,17 @@ class HypsFromBeamSearchOuts : public OpKernel {
                 // Assemble terminated hyp.
                 terminated_hyps.set_beam_id(j % num_beams);
                 for (int l = hyp_local_scores.size() - 1; l >= 0; --l) {
-                  terminated_hyps.add_scores(hyp_local_scores[l]);
+                  terminated_hyps.add_scores(float(hyp_local_scores[l]));
                   terminated_hyps.add_ids(hyp_token_ids[l]);
                   const int cur_step = hyp_local_scores.size() - 1 - l;
                   auto* att_vec = terminated_hyps.add_atten_vecs();
                   for (int d = 0; d < atten_probs.dim_size(2); ++d) {
                     if (l == 0) {
                       att_vec->add_prob(
-                          t_eos_atten_probs(cur_step, hyp_ids[l], d));
+                          float(t_eos_atten_probs(cur_step, hyp_ids[l], d)));
                     } else {
-                      att_vec->add_prob(t_atten_probs(cur_step, hyp_ids[l], d));
+                      att_vec->add_prob(
+                          float(t_atten_probs(cur_step, hyp_ids[l], d)));
                     }
                   }
                 }
@@ -1026,7 +1016,14 @@ class HypsFromBeamSearchOuts : public OpKernel {
   int32 num_hyps_per_beam_ = 0;
 };
 
-REGISTER_KERNEL_BUILDER(Name("HypsFromBeamSearchOuts").Device(DEVICE_CPU),
-                        HypsFromBeamSearchOuts);
+REGISTER_KERNEL_BUILDER(Name("HypsFromBeamSearchOuts")
+                            .Device(DEVICE_CPU)
+                            .TypeConstraint<float>("T"),
+                        HypsFromBeamSearchOuts<float>);
+REGISTER_KERNEL_BUILDER(Name("HypsFromBeamSearchOuts")
+                            .Device(DEVICE_CPU)
+                            .TypeConstraint<bfloat16>("T"),
+                        HypsFromBeamSearchOuts<bfloat16>);
+
 }  // namespace lingvo
 }  // namespace tensorflow

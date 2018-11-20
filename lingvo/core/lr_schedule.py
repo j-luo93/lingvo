@@ -24,13 +24,12 @@ import tensorflow as tf
 
 from tensorflow.python.framework import function
 from lingvo.core import base_layer
-from lingvo.core import cluster_factory
 from lingvo.core import early_stop
 from lingvo.core import py_utils
 from lingvo.core.ops import py_x_ops
 
 
-class BaseLearningRateSchedule(base_layer.LayerBase):
+class BaseLearningRateSchedule(base_layer.BaseLayer):
   """Base class for learning rate decay algorithms."""
 
   @classmethod
@@ -292,14 +291,14 @@ class TransformerLearningRateScheduleNoWarmUp(BaseLearningRateSchedule):
 
 class LinearRampupExponentialDecayScaledByNumSplitSchedule(
     BaseLearningRateSchedule):
-  """A learning rate schedule does the following.
+  """A learning rate schedule that does the following.
 
-    1. The peak learning rate multiplier is scaled by num splits,
-    (often the same as #replicas during sbatch splitting synchronous
-    training).
-    2. The multiplier ramps up linearly from 1 to the peak initially.
-    3. The multiplier stays constant until the exponential decay starts.
-    4. The multiplier is capped at max.
+  1. The peak learning rate multiplier is scaled by num splits,
+     (often the same as #replicas during batch splitting synchronous
+     training).
+  2. The multiplier ramps up linearly from 1 to the peak initially.
+  3. The multiplier stays constant until the exponential decay starts.
+  4. The multiplier is capped at max.
   """
 
   @classmethod
@@ -336,7 +335,7 @@ class LinearRampupExponentialDecayScaledByNumSplitSchedule(
       splits = p.num_splits
     else:
       # Infer num_splits from cluster.
-      cluster_params = cluster_factory.Current().params.Copy()
+      cluster_params = self.cluster.params.Copy()
       cluster_params.task = 0
       assert cluster_params.mode == 'sync'
       cluster_params.job = 'trainer_client'
@@ -367,15 +366,15 @@ class LinearRampupExponentialDecayScaledByNumSplitSchedule(
 
 
 class LinearRampupPiecewiseConstantSchedule(BaseLearningRateSchedule):
-  """A learning rate schedule does the following.
+  """A learning rate schedule that does the following.
 
-    1. The learning rate is scaled by #split * lrs[i]
-      (often #split is the same as #replicas during batch splitting synchronous
-      training).
-    2. The multiplier ramps up linearly from 0 to the peak(lrs[0]) at
-       boundaries[0].
-    3. After peak, the multiplier stays lrs[i] when step falls into
-       [boundaries[i], boundaries[i+1])
+  1. The learning rate is scaled by #split * lrs[i]
+     (often #split is the same as #replicas during batch splitting synchronous
+     training).
+  2. The multiplier ramps up linearly from 0 to the peak(lrs[0]) at
+     boundaries[0].
+  3. After peak, the multiplier stays lrs[i] when step falls into
+     [boundaries[i], boundaries[i+1])
   """
 
   @classmethod
@@ -400,7 +399,7 @@ class LinearRampupPiecewiseConstantSchedule(BaseLearningRateSchedule):
       splits = p.num_splits
     else:
       # Infer num_splits from cluster.
-      cluster_params = cluster_factory.Current().params.Copy()
+      cluster_params = self.cluster.params.Copy()
       cluster_params.task = 0
       assert cluster_params.mode == 'sync'
       cluster_params.job = 'trainer_client'
@@ -435,12 +434,14 @@ class DevBasedSchedule(BaseLearningRateSchedule):
   This reads a file containing a history of values of a selected metric versus
   global step (file is recorded by the evaler loop in the trainer). Decay
   depends on these variables:
-    best_step - step at which optimum metric value occurred in history file
-    last_step - last step recorded in history file
-    ref_step - most recent decay step or best_step
-    cur_factor - current multiplier on initial learning rate
 
-  The decay algorithm is:
+    - best_step - step at which optimum metric value occurred in history file
+    - last_step - last step recorded in history file
+    - ref_step - most recent decay step or best_step
+    - cur_factor - current multiplier on initial learning rate
+
+  The decay algorithm is::
+
     ref_step = max(ref_step, best_step)
     if last_step - ref_step > window:
       cur_factor = max(cur_factor * decay, min_factor)

@@ -72,6 +72,12 @@ class BaseTrainerTest(tf.test.TestCase):
         return True
     return False
 
+  def _GetMatchedFileName(self, files, substr):
+    for f in files:
+      if substr in f:
+        return f
+    return None
+
   def _HasLine(self, filename, pattern):
     """Returns True iff one line in the given file matches the pattern."""
     with tf.gfile.FastGFile(filename, 'r') as f:
@@ -111,7 +117,9 @@ class TrainerTest(BaseTrainerTest):
     FLAGS.logdir = logdir
     cfg = self._GetTestConfig()
 
-    trainer.RunnerManager.StartRunners(
+    runner_manager = trainer.RunnerManager(cfg.name)
+
+    runner_manager.StartRunners(
         [self._CreateController(cfg),
          self._CreateTrainer(cfg)])
 
@@ -127,15 +135,15 @@ class TrainerTest(BaseTrainerTest):
     # EvalerDev may not run concurrently with Controller in a single process
     # because EvalerDev loads checkpoints and overwrites states like global
     # steps.
-    trainer.RunnerManager.StartRunners([self._CreateEvalerDev(cfg)])
+    runner_manager.StartRunners([self._CreateEvalerDev(cfg)])
 
     dev_files = tf.gfile.Glob(logdir + '/eval_dev/*')
     self.assertTrue(self._HasFile(dev_files, 'params.txt'))
     self.assertTrue(self._HasFile(dev_files, 'eval_dev.pbtxt'))
     self.assertTrue(self._HasFile(dev_files, 'tfevents'))
-    self.assertTrue(self._HasFile(dev_files, 'score.txt'))
+    self.assertTrue(self._HasFile(dev_files, 'score'))
     self.assertTrue(
-        self._HasLine(os.path.join(logdir, 'eval_dev/score.txt'), 'log_pplx'))
+        self._HasLine(self._GetMatchedFileName(dev_files, 'score'), 'log_pplx'))
 
   def testDecoder(self):
     logdir = os.path.join(tf.test.get_temp_dir(),
@@ -143,19 +151,21 @@ class TrainerTest(BaseTrainerTest):
     FLAGS.logdir = logdir
     cfg = self._GetTestConfig()
 
-    trainer.RunnerManager.StartRunners(
+    runner_manager = trainer.RunnerManager(cfg.name)
+
+    runner_manager.StartRunners(
         [self._CreateController(cfg),
          self._CreateTrainer(cfg)])
-    trainer.RunnerManager.StartRunners([self._CreateDecoderDev(cfg)])
+    runner_manager.StartRunners([self._CreateDecoderDev(cfg)])
 
     dec_files = tf.gfile.Glob(logdir + '/decoder_dev/*')
     self.assertTrue(self._HasFile(dec_files, 'params.txt'))
     self.assertTrue(self._HasFile(dec_files, 'decoder_dev.pbtxt'))
     self.assertTrue(self._HasFile(dec_files, 'tfevents'))
-    self.assertTrue(self._HasFile(dec_files, 'score.txt'))
+    self.assertTrue(self._HasFile(dec_files, 'score'))
     self.assertTrue(
         self._HasLine(
-            os.path.join(logdir, 'decoder_dev/score.txt'), 'examples/sec'))
+            self._GetMatchedFileName(dec_files, 'score'), 'examples/sec'))
 
 
 class TrainerWithTrialTest(TrainerTest):
@@ -191,7 +201,8 @@ class TrainerWithTrialTest(TrainerTest):
                                                           (5, 5, 10, 50)])
       self.assertEqual(runner.params.task.train.lr_schedule.decay_start, 100)
 
-    trainer.RunnerManager.StartRunners(runners)
+    runner_manager = trainer.RunnerManager(cfg.name)
+    runner_manager.StartRunners(runners)
     # Controller and trainer check whether the trial is stopped.
     self.assertGreater(trial.OverrideModelParams.call_count, 0)
     self.assertGreater(trial.ShouldStop.call_count, 0)
@@ -220,9 +231,9 @@ class TrainerWithTrialTest(TrainerTest):
     self.assertTrue(self._HasFile(dev_files, 'params.txt'))
     self.assertTrue(self._HasFile(dev_files, 'eval_dev.pbtxt'))
     self.assertTrue(self._HasFile(dev_files, 'tfevents'))
-    self.assertTrue(self._HasFile(dev_files, 'score.txt'))
+    self.assertTrue(self._HasFile(dev_files, 'score'))
     self.assertTrue(
-        self._HasLine(os.path.join(logdir, 'eval_dev/score.txt'), 'log_pplx'))
+        self._HasLine(self._GetMatchedFileName(dev_files, 'score'), 'log_pplx'))
 
 
 if __name__ == '__main__':

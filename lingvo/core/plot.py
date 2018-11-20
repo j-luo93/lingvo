@@ -19,7 +19,6 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
-import cStringIO
 import functools
 import traceback
 
@@ -28,6 +27,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import six
+from six.moves import cStringIO
 from six.moves import range
 import tensorflow as tf
 
@@ -92,6 +92,34 @@ def AddImage(fig,
     axes.set_yticks([])
 
 
+def AddScatterPlot(unused_fig,
+                   axes,
+                   xs,
+                   ys,
+                   title=u'',
+                   xlabel=u'',
+                   ylabel=u'',
+                   fontsize='small',
+                   xlim=None,
+                   ylim=None,
+                   suppress_xticks=False,
+                   suppress_yticks=False,
+                   **kwargs):
+  """Convenience function to add a scatter plot."""
+  axes.scatter(xs, ys, **kwargs)
+  axes.set_title(ToUnicode(title), size=fontsize)
+  axes.set_xlabel(ToUnicode(xlabel), size=fontsize)
+  axes.set_ylabel(ToUnicode(ylabel), size=fontsize)
+  if xlim:
+    axes.set_xlim(xlim)
+  if ylim:
+    axes.set_ylim(ylim)
+  if suppress_xticks:
+    axes.set_xticks([])
+  if suppress_yticks:
+    axes.set_yticks([])
+
+
 _SubplotMetadata = collections.namedtuple('_SubplotMetadata',
                                           ['tensor_list', 'plot_func'])
 
@@ -99,12 +127,13 @@ _SubplotMetadata = collections.namedtuple('_SubplotMetadata',
 class MatplotlibFigureSummary(object):
   """Helper to minimize boilerplate in creating a summary with several subplots.
 
-  Typical usage:
-  >>> fig_helper = plot.MatplotlibFigureSummary(
-  ...    'summary_name', shared_subplot_kwargs={'xlabel': 'Time'})
-  >>> fig_helper.AddSubplot([tensor1], title='tensor1')
-  >>> fig_helper.AddSubplot([tensor2], title='tensor2', ylabel='Frequency')
-  >>> image_summary = fig_helper.Finalize()
+  Typical usage::
+
+      >>> fig_helper = plot.MatplotlibFigureSummary(
+      ...    'summary_name', shared_subplot_kwargs={'xlabel': 'Time'})
+      >>> fig_helper.AddSubplot([tensor1], title='tensor1')
+      >>> fig_helper.AddSubplot([tensor2], title='tensor2', ylabel='Frequency')
+      >>> image_summary = fig_helper.Finalize()
   """
 
   def __init__(self,
@@ -123,8 +152,8 @@ class MatplotlibFigureSummary(object):
         dimensions in inches.
       max_outputs: The maximum number of images to generate.
       subplot_grid_shape: A 2D tuple containing the height and width dimensions
-        of the subplot grid.  height * width must be <= len(tensor_list).
-        Defaults to (len(tensor_list), 1), i.e. a vertical stack of plots.
+        of the subplot grid.  height * width must be >= the number of subplots.
+        Defaults to (num_subplots, 1), i.e. a vertical stack of plots.
       gridspec_kwargs: A dict of extra keyword args to use when initializing the
         figure's gridspec, as supported by matplotlib.gridspec.GridSpec.
       plot_func: A function shared across all subplots used to populate a single
@@ -144,14 +173,14 @@ class MatplotlibFigureSummary(object):
     self._subplots = []
 
   def AddSubplot(self, tensor_list, plot_func=None, **kwargs):
-    """Adds a subplot from tensors using plot_fun to populate the subplot axes.
+    r"""Adds a subplot from tensors using plot_fun to populate the subplot axes.
 
     Args:
       tensor_list: A list of tensors to be realized as numpy arrays and passed
         as arguments to plot_func.  The first dimension of each tensor in the
         list corresponds to batch, and must be the same size for each tensor.
       plot_func: A function with signature f(fig, axes, data1, data2, ...,
-        datan, **kwargs) that will be called with the realized data from
+        datan, \*\*kwargs) that will be called with the realized data from
         tensor_list to plot data on axes in fig.  This function is called
         independently on each element of the batch.  Overrides plot_func passed
         in to the constructor.
@@ -212,26 +241,26 @@ def _RenderOneMatplotlibFigure(fig, plot_func, *numpy_data_list):
 
 
 def _RenderMatplotlibFigures(figsize, max_outputs, plot_func, *numpy_data_list):
-  """Renders a figure containing several subplots using matplotlib.
+  r"""Renders a figure containing several subplots using matplotlib.
 
   This is an internal implementation detail of MatplotlibFigureSummary.Finalize
   and should not be called directly.
 
   The unconventional function signature is used to work around the behavior of
-  tf.py_func which always passes in different tensors as positional arguments.
+  `tf.py_func` which always passes in different tensors as positional arguments.
 
   Args:
     figsize: A 2D tuple containing the overall figure (width, height) dimensions
       in inches.
     max_outputs: The maximum number of images to generate.
     plot_func: A function with signature f(fig, data1, data2, ..., datan) that
-      will be called with *numpy_data_list to plot data in fig.
+      will be called with \*numpy_data_list to plot data in fig.
     *numpy_data_list: A list of numpy matrices to plot specified as separate
       arguments.
 
   Returns:
     A numpy 4D array of type np.uint8 which can be used to generate a
-    tf.image_summary when converted to a tf tensor.
+    `tf.image_summary` when converted to a tf tensor.
   """
   batch_size = numpy_data_list[0].shape[0]
   max_outputs = min(max_outputs, batch_size)
@@ -269,7 +298,7 @@ def _FigureToSummary(name, fig):
   canvas = backend_agg.FigureCanvasAgg(fig)
   fig.canvas.draw()
   ncols, nrows = fig.canvas.get_width_height()
-  png_file = cStringIO.StringIO()
+  png_file = cStringIO()
   canvas.print_figure(png_file)
   png_str = png_file.getvalue()
   return tf.Summary(value=[
@@ -293,9 +322,10 @@ def Matrix(name, figsize, matrix, setter=None, **kwargs):
     matrix: A 2D numpy array.
     setter: A callable taking (fig, axes). Useful to fine-control
       layout of the figure, xlabel, xticks, etc.
+    **kwargs: Additional arguments to AddImage.
 
   Returns:
-    A tf.Summary proto contains one image visualizing 'matrix.
+    A `tf.Summary` proto contains one image visualizing 'matrix.
   """
   fig = plt.Figure(figsize=figsize, dpi=100, facecolor='white')
   axes = fig.add_subplot(1, 1, 1)
@@ -306,20 +336,20 @@ def Matrix(name, figsize, matrix, setter=None, **kwargs):
 
 
 def Curve(name, figsize, xs, ys, setter=None, **kwargs):
-  """Plot curve(s) to a tf.Summary proto.
+  """Plot curve(s) to a `tf.Summary` proto.
 
   Args:
     name: Image summary name.
-    figsize: A 2D tuple containing the overall figure (width, height)
-      dimensions in inches.
+    figsize: A 2D tuple containing the overall figure (width, height) dimensions
+      in inches.
     xs: x values for matplotlib.pyplot.plot.
     ys: y values for matplotlib.pyplot.plot.
-    setter: A callable taking (fig, axes). Useful to fine-control
-      layout of the figure, xlabel, xticks, etc.
+    setter: A callable taking (fig, axes). Useful to fine-control layout of the
+      figure, xlabel, xticks, etc.
     **kwargs: Extra args for matplotlib.pyplot.plot.
 
   Returns:
-    A tf.Summary proto contains the line plot.
+    A `tf.Summary` proto contains the line plot.
   """
   fig = plt.Figure(figsize=figsize, dpi=100, facecolor='white')
   axes = fig.add_subplot(1, 1, 1)

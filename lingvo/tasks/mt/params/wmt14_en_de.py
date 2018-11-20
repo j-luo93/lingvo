@@ -76,7 +76,7 @@ class WmtEnDeTransformerBase(base_model_params.SingleTaskModelParams):
     p.file_parallelism = 1
     p.file_buffer_size = 1
 
-    p.file_pattern = 'tfrecord:' + os.path.join(cls.DATADIR, 'test.tfrecods')
+    p.file_pattern = 'tfrecord:' + os.path.join(cls.DATADIR, 'test.tfrecords')
     p.tokenizer.token_vocab_filepath = os.path.join(cls.DATADIR, 'wpm_ende.voc')
 
     p.tokenizer.vocab_size = cls.VOCAB_SIZE

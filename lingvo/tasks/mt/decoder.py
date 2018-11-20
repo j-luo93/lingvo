@@ -56,13 +56,9 @@ class MTBaseDecoder(base_decoder.BaseBeamSearchDecoder):
     p = super(MTBaseDecoder, cls).Params()
     p.Define('label_smoothing', None, 'Label smoothing class.')
     p.Define('softmax', layers.SimpleFullSoftmax.Params(), 'Softmax params.')
-    p.Define('per_word_avg_loss', False,
-             'Compute loss averaged per word. If False '
-             'loss is computed averaged per sequence.')
-    p.Define('random_seed', None,
-             'If set, this decides the random seed to apply in various random'
-             ' ops such that this decoder is deterministic. Set this'
-             ' random_seed only for unittests.')
+    p.Define(
+        'per_word_avg_loss', False, 'Compute loss averaged per word. If False '
+        'loss is computed averaged per sequence.')
     p.Define('unidi_rnn_type', 'func', 'Options: func, native_cudnn. '
              'func: FRNN, native_cudnn: CuDNNLSTM.')
     p.Define('feed_attention_context_vec_to_softmax', False,
@@ -94,9 +90,9 @@ class MTBaseDecoder(base_decoder.BaseBeamSearchDecoder):
     """Computes cross-entropy loss given the softmax input, labels and weights.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
-      softmax_input: A tensor of shape [time, batch, params.softmax.input_dim].
+      softmax_input: A tensor of shape [time, batch, p.softmax.input_dim].
       target_labels: A matrix of tf.int32. [time, batch].
       target_weights: A matrix of params.dtype. [time, batch].
       target_paddings: A matrix of params.dtype. [time, batch].
@@ -222,6 +218,9 @@ class MTBaseDecoder(base_decoder.BaseBeamSearchDecoder):
       atten_probs: a list of attention probs, each element is of shape
           [tgt_len, tgt_batch, src_len].
     """
+    if not self.cluster.add_summary:
+      return
+
     num_rows = len(atten_probs)
     fig = plot.MatplotlibFigureSummary(
         'decoder_example',
@@ -270,8 +269,6 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
     p.Define('rnn_cell_dim', 1024, 'size of the rnn cells.')
     p.Define('rnn_layers', 8, 'Number of rnn layers.')
     p.Define('residual_start', 2, 'Start residual connections from this layer.')
-    p.Define('target_seq_len', 300, 'During beam search, decodes '
-             'up to this length.')
     p.Define('atten_rnn_cls', rnn_layers.FRNNWithAttention,
              'Which atten rnn cls to use.')
     p.Define('use_prev_atten_ctx', False,
@@ -316,6 +313,7 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
     p.softmax.params_init = default_params_init
 
     # Default config for beam search.
+    p.target_seq_len = 300
     p.beam_search.length_normalization = 0.2
     p.beam_search.coverage_penalty = 0.2
 
@@ -334,7 +332,7 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
         self.CreateChild('cc_schedule', p.cc_schedule)
 
       if py_utils.use_tpu():
-        emb_device = cluster_factory.Current().WorkerDeviceInModelSplit(0)
+        emb_device = self.cluster.WorkerDeviceInModelSplit(0)
       else:
         emb_device = ''
       with tf.device(emb_device):
@@ -397,9 +395,6 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
         p.softmax.input_dim = p.rnn_cell_dim
       self.CreateChild('softmax', p.softmax)
 
-      p.beam_search.target_seq_len = p.target_seq_len
-      self.CreateChild('beam_search', p.beam_search)
-
   def ApplyDropout(self, x_in):
     p = self.params
     assert 0 <= p.dropout_prob and p.dropout_prob < 1.0
@@ -414,17 +409,18 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
     else:
       return x
 
+  @py_utils.NameScopeDecorator('MTDecoderV1/ComputePredictions')
   def ComputePredictions(self, theta, source_encs, source_paddings, targets,
                          src_segment_id):
-    """Decodes 'targets' given encoded source.
+    """Decodes `targets` given encoded source.
 
     Args:
-      theta: A nested map object containing weights' values of this
-        layer and its children layers.
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
       source_encs: source encoding, of shape [time, batch, depth].
       source_paddings: source encoding's padding, of shape [time, batch].
       targets: A dict of string to tensors representing the targets one try to
-          predict. Each tensor in targets is of shape [batch, time].
+        predict. Each tensor in targets is of shape [batch, time].
       src_segment_id: source segment id, of shape [time, batch].
 
     Returns:
@@ -443,7 +439,7 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
         target_segment_id = tf.zeros_like(target_paddings)
 
       if py_utils.use_tpu():
-        emb_device = cluster_factory.Current().WorkerDeviceInModelSplit(0)
+        emb_device = self.cluster.WorkerDeviceInModelSplit(0)
       else:
         emb_device = ''
       with tf.device(emb_device):
@@ -462,8 +458,7 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
             target_paddings,
             src_segment_id=src_segment_id,
             segment_id=target_segment_id)
-        if p.add_summary:
-          self._AddAttenProbsSummary(source_paddings, targets, [atten_probs])
+        self._AddAttenProbsSummary(source_paddings, targets, [atten_probs])
 
         atten_ctxs = self.ApplyClipping(theta, atten_ctxs)
         summary_utils.histogram(p, 'atten_ctxs', atten_ctxs)
@@ -488,19 +483,12 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
 
         return xs
 
-  def ComputeLoss(self, theta, predictions, targets):
-    segment_id = None
-    if self.params.packed_input:
-      segment_id = tf.transpose(targets.segment_ids)
-    return self._FPropSoftmax(theta, predictions, tf.transpose(targets.labels),
-                              tf.transpose(targets.weights),
-                              tf.transpose(targets.paddings), segment_id)
-
+  @py_utils.NameScopeDecorator('MTDecoderV1/InitDecoder')
   def _InitDecoder(self, theta, source_encs, source_paddings, num_hyps):
     """Returns initial decoder states.
 
     Args:
-      theta: A nested map object containing weights' values of this layer and
+      theta: A `.NestedMap` object containing weights' values of this layer and
           its children layers.
       source_encs: source encoding, of shape [time, batch, depth].
       source_paddings: source encoding's padding, of shape [time, batch].
@@ -539,6 +527,7 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
     assert atten_states is not None
     return rnn_states, atten_context, atten_probs, atten_states
 
+  @py_utils.NameScopeDecorator('MTDecoderV1/DecodeStep')
   def _DecodeStep(self, theta, embs, step_paddings, prev_atten_context,
                   rnn_states, prev_atten_states):
     """Decode one step."""
@@ -589,11 +578,11 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
   def _GetAttentionInitState(self):
     """Gets the attention initialization state.
 
-    It is valid to call this after _DecoderInit(). Inference subclasses use
+    It is valid to call this after `_DecoderInit()`. Inference subclasses use
     this to split computation across subgraph boundaries.
 
     Returns:
-      NestedMap of attention source states.
+      `.NestedMap` of attention source states.
     """
     return self._atten.GetInitializationSourceState()
 
@@ -601,12 +590,13 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
     """Sets the attention initialization state.
 
     Args:
-      new_init_state: NestedMap compatible with that returned from
-      _GetAttentionSourceState.
+      new_init_state: `.NestedMap` compatible with that returned from
+        `_GetAttentionSourceState`.
     """
     self._atten.SetInitializationSourceState(new_init_state)
 
   def _InitBeamSearchStateCallback(self,
+                                   theta,
                                    source_encs,
                                    source_paddings,
                                    num_hyps_per_beam,
@@ -617,23 +607,27 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
       source_encs: A tensor of shape [src_len, src_batch, source_dim].
       source_paddings: A tensor of shape [src_len, src_batch].
       num_hyps_per_beam: An int, number hyps to keep for source sentence.
-      additional_source_info: a NestedMap of tensors containing extra context
+      additional_source_info: a `.NestedMap` of tensors containing extra context
           information about the source that may be useful for decoding.
     Returns:
-      initial_results: a NestedMap of initial results.
-          atten_probs: The initial attention probs, of shape [tgt_batch,
-              src_len].
-      states: a NestedMap of initial model states.
-          rnn_states: Initial state of the RNN.
-          atten_context: Initial attention context vector.
-          atten_states: Initial attention state.
+      A tuple (initial_results, states).
+        initial_results: a `.NestedMap` of initial results.
+          atten_probs:
+            The initial attention probs, of shape [tgt_batch, src_len].
+        states: a `.NestedMap` of initial model states.
+          rnn_states:
+            Initial state of the RNN.
+          atten_context:
+            Initial attention context vector.
+          atten_states:
+            Initial attention state.
     """
     # additional_source_info is currently not used.
     del additional_source_info
     num_beams = py_utils.GetShape(source_encs)[1]
     num_hyps = num_beams * num_hyps_per_beam
     rnn_states, init_atten_context, atten_probs, atten_states = (
-        self._InitDecoder(self.theta, source_encs, source_paddings, num_hyps))
+        self._InitDecoder(theta, source_encs, source_paddings, num_hyps))
 
     initial_results = py_utils.NestedMap({'atten_probs': atten_probs})
 
@@ -644,7 +638,9 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
         'atten_states': atten_states,
     })
 
+  @py_utils.NameScopeDecorator('MTDecoderV1/PreBeamSearchStepCallback')
   def _PreBeamSearchStepCallback(self,
+                                 theta,
                                  source_encs,
                                  source_paddings,
                                  step_ids,
@@ -657,21 +653,26 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
       source_encs: A tensor of shape [src_len, src_batch, source_dim].
       source_paddings: A tensor of shape [src_len, src_batch].
       step_ids: A tensor of shape [tgt_batch, 1].
-      states: A NestedMap of tensors representing states that the clients
+      states: A `.NestedMap` of tensors representing states that the clients
           would like to keep track of for each of the active hyps.
       num_hyps_per_beam: Beam size.
-      additional_source_info: a NestedMap of tensors containing extra context
+      additional_source_info: a `.NestedMap` of tensors containing extra context
           information about the source that may be useful for decoding.
     Returns:
-      results: A NestedMap of beam search results.
-          atten_probs: The updated attention probs, of shape [tgt_batch,
-              src_len].
-          log_probs: Log prob for each of the tokens in the target vocab. This
-              is of shape [tgt_batch, vocab_size].
-      out_states: A NestedMap. The updated states.
-          rnn_states: Last state of the RNN.
-          atten_context: Updated attention context vector.
-          atten_states: Updates attention states.
+      A tuple (results, out_states).
+      results: A `.NestedMap` of beam search results.
+        atten_probs:
+          The updated attention probs, of shape [tgt_batch, src_len].
+        log_probs:
+          Log prob for each of the tokens in the target vocab. This is of shape
+          [tgt_batch, vocab_size].
+      out_states: A `.NestedMap`. The updated states.
+        rnn_states:
+          Last state of the RNN.
+        atten_context:
+          Updated attention context vector.
+        atten_states:
+          Updates attention states.
     """
     p = self.params
     # additional_source_info is currently not used.
@@ -682,14 +683,14 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
     prev_atten_probs = states['atten_probs']
     prev_atten_states = states['atten_states']
     step_paddings = tf.zeros(py_utils.GetShape(step_ids), dtype=p.dtype)
-    embs = self.emb.EmbLookupDefaultTheta(tf.reshape(step_ids, [-1]))
-    embs = self.ApplyClipping(self.theta, embs)
+    embs = self.emb.EmbLookup(theta.emb, tf.reshape(step_ids, [-1]))
+    embs = self.ApplyClipping(theta, embs)
     atten_context, atten_probs, rnn_states, step_out, atten_states = (
-        self._DecodeStep(self.theta, embs, step_paddings, prev_atten_context,
+        self._DecodeStep(theta, embs, step_paddings, prev_atten_context,
                          prev_rnn_states, prev_atten_states))
     atten_probs = tf.reshape(atten_probs, tf.shape(prev_atten_probs))
 
-    logits = self.softmax.Logits(self.theta.softmax, [step_out])
+    logits = self.softmax.Logits(theta.softmax, [step_out])
     log_probs = self.fns.qlogsoftmax(
         logits, qmin=p.qlogsoftmax_range_min, qmax=0.0)
 
@@ -712,6 +713,7 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
     return bs_results, new_states
 
   def _PostBeamSearchStepCallback(self,
+                                  theta,
                                   source_encs,
                                   source_paddings,
                                   new_step_ids,
@@ -732,16 +734,16 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
       source_paddings: source encoding's padding, of shape [time, batch].
       num_hyps_per_beam_override: If set to a value <= 0, this parameter is
         ignored. If set to a value > 0, then this value will be used to
-        override p.num_hyps_per_beam.
-      additional_source_info: a NestedMap of tensors containing extra context
+        override `p.num_hyps_per_beam`.
+      additional_source_info: a `.NestedMap` of tensors containing extra context
           information about the source that may be useful for decoding.
 
     Returns:
-      BeamSearchDecodeOutput, a namedtuple containing the decode results
+      BeamSearchDecodeOutput, a namedtuple containing the decode results.
     """
     del additional_source_info  # Unused.
     return self.beam_search.BeamSearchDecode(
-        source_encs, source_paddings, num_hyps_per_beam_override,
+        self.theta, source_encs, source_paddings, num_hyps_per_beam_override,
         self._InitBeamSearchStateCallback, self._PreBeamSearchStepCallback,
         self._PostBeamSearchStepCallback)
 
@@ -766,7 +768,6 @@ class TransformerDecoder(MTBaseDecoder):
     p.Define('num_trans_layers', 6, 'Number of Transformer layers.')
     p.Define('trans_tpl', layers_with_attention.TransformerLayer.Params(),
              'Transformer layer params.')
-    p.Define('target_seq_len', 300, 'Target seq length.')
     p.Define('input_dropout_prob', 0.0, 'Prob at which we do input dropout.')
     p.Define(
         'is_transparent', False, 'If set, expects a tensor of shape '
@@ -792,6 +793,7 @@ class TransformerDecoder(MTBaseDecoder):
     p.trans_tpl.tr_fflayer_tpl.hidden_dim = 2048
 
     # Default config for beam search.
+    p.target_seq_len = 300
     p.beam_search.length_normalization = 0.5
     p.beam_search.coverage_penalty = 0.0
 
@@ -818,10 +820,8 @@ class TransformerDecoder(MTBaseDecoder):
 
       dropout_tpl = layers.DropoutLayer.Params()
       dropout_tpl.keep_prob = (1.0 - p.input_dropout_prob)
-      dropout_tpl.seed = p.random_seed
       self.CreateChild('input_dropout', dropout_tpl)
 
-      p.trans_tpl.random_seed = p.random_seed
       params_trans_layers = []
       for i in range(p.num_trans_layers):
         params = p.trans_tpl.Copy()
@@ -833,28 +833,25 @@ class TransformerDecoder(MTBaseDecoder):
       p.softmax.input_dim = p.model_dim
       self.CreateChild('softmax', p.softmax)
 
-      p.beam_search.target_seq_len = p.target_seq_len
-      self.CreateChild('beam_search', p.beam_search)
-
   def _FProp(self, theta, source_encs, source_paddings, targets,
              src_segment_id):
-    """Decodes 'targets' given encoded source.
+    """Decodes `targets` given encoded source.
 
     Args:
-      theta: A nested map object containing weights' values of this
-          layer and its children layers.
-      source_encs: source encoding. When p.is_transparent is False, it is a
-          tensor of shape [time, batch, depth]. When p.is_transparent is True,
-          it is a tensor of shape [time, batch, depth, num_trans_layers] if
-          p.is_eval is True, and a list of num_trans_layers tensors of shape
-          [time, batch, depth] if p.is_eval is False.
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      source_encs: source encoding. When `p.is_transparent` is False, it is a
+        tensor of shape [time, batch, depth]. When `p.is_transparent` is True,
+        it is a tensor of shape [time, batch, depth, num_trans_layers] if
+        `p.is_eval` is True, and a list of `num_trans_layers` tensors of shape
+        [time, batch, depth] if `p.is_eval` is False.
       source_paddings: source encoding's padding, of shape [time, batch].
       targets: A dict of string to tensors representing the targets one try to
-          predict. Each tensor in targets is of shape [batch, time].
+        predict. Each tensor in targets is of shape [batch, time].
       src_segment_id: source segment id, of shape [time, batch].
 
     Returns:
-      Output of the last decoder layer: [target_time, target_batch, source_dim]
+      Output of last decoder layer, [target_time, target_batch, source_dim].
     """
     p = self.params
     time, batch = py_utils.GetShape(source_paddings, 2)
@@ -921,33 +918,32 @@ class TransformerDecoder(MTBaseDecoder):
         layer_in = layer_out
         atten_probs.append(probs)
 
-      if p.add_summary:
-        self._AddAttenProbsSummary(source_paddings, targets, atten_probs)
+      self._AddAttenProbsSummary(source_paddings, targets, atten_probs)
 
       return layer_out
 
   def ExtendStep(self, theta, source_encs, source_paddings, new_ids,
                  t, prefix_states):
-    """Extend prefix as represeted by 'prefix_states' by one more step.
+    """Extend prefix as represented by `prefix_states` by one more step.
 
     This function is expected to be called during fast decoding of Transformer
     models.
 
     Args:
-      theta: A nested map object containing weights' values of this
-          layer and its children layers.
-      source_encs: source encoding, of shape [time, batch, depth].
-          Can be [time, bs, depth, num_trans_layers] if is_transparent is set.
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      source_encs: source encoding, of shape [time, batch, depth]. Can be [time,
+        bs, depth, num_trans_layers] if is_transparent is set.
       source_paddings: source encoding's padding, of shape [time, batch].
-      new_ids: new input ids, of shape [batch]
+      new_ids: new input ids, of shape [batch].
       t: a scalar, the current time step, 0-based.
-      prefix_states: a NestedMap representing the prefix that has already been
-          decoded.
+      prefix_states: a `.NestedMap` representing the prefix that has already
+        been decoded.
 
     Returns:
       A pair (last_decoder_out, prefix_states), where last_decoder_out is the
-      output of the last decoder layer. It is a tensor of shape [batch,
-      model_dim], and prefix_states is the update prefix states.
+      output of the last decoder layer of shape [batch, model_dim], and
+      `prefix_states` is the update prefix states.
     """
     p = self.params
     time, batch = py_utils.GetShape(source_paddings, 2)
@@ -987,16 +983,16 @@ class TransformerDecoder(MTBaseDecoder):
 
   def ComputePredictions(self, theta, source_encs, source_paddings, targets,
                          src_segment_id):
-    """Decodes 'targets' given encoded source.
+    """Decodes `targets` given encoded source.
 
     Args:
-      theta: A nested map object containing weights' values of this
-          layer and its children layers.
-      source_encs: source encoding, of shape [time, batch, depth].
-          Can be [time, batch, depth, num_layers] if is_transparent is set.
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      source_encs: source encoding, of shape [time, batch, depth]. Can be [time,
+        batch, depth, num_layers] if is_transparent is set.
       source_paddings: source encoding's padding, of shape [time, batch].
       targets: A dict of string to tensors representing the targets one try to
-          predict. Each tensor in targets is of shape [batch, time].
+        predict. Each tensor in targets is of shape [batch, time].
       src_segment_id: source segment id, of shape [time, batch].
 
     Returns:
@@ -1006,6 +1002,7 @@ class TransformerDecoder(MTBaseDecoder):
                        src_segment_id)
 
   def _InitBeamSearchStateCallback(self,
+                                   theta,
                                    source_encs,
                                    source_paddings,
                                    num_hyps_per_beam,
@@ -1013,20 +1010,26 @@ class TransformerDecoder(MTBaseDecoder):
     """Returns initial beams search states.
 
     Args:
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
       source_encs: A tensor of shape [src_len, src_batch, source_dim].
           Can be [time, batch, depth, num_layers] if is_transparent is set.
       source_paddings: A tensor of shape [src_len, src_batch].
       num_hyps_per_beam: An int, number hyps to keep for source sentence.
-      additional_source_info: a NestedMap of tensors containing extra context
+      additional_source_info: a `.NestedMap` of tensors containing extra context
           information about the source that may be useful for decoding.
     Returns:
-      initial_results: a NestedMap of initial results.
-          atten_probs: The initial attention probs, of shape [tgt_batch,
-              src_len].
-      states: a NestedMap of initial model states.
-          source_encs: A tensor of shape [src_batch, src_len, source_dim].
-          source_paddings: A tensor of shape [src_batch, src_len].
-          target_ids: Initial empty list of decoded ids. [num_hyps, 0]
+      A tuple (initial_results, states).
+        initial_results: a `.NestedMap` of initial results.
+          atten_probs:
+            The initial attention probs, of shape [tgt_batch, src_len].
+        states: a `.NestedMap` of initial model states.
+          source_encs:
+            A tensor of shape [src_batch, src_len, source_dim].
+          source_paddings:
+            A tensor of shape [src_batch, src_len].
+          target_ids:
+            Initial empty list of decoded ids. [num_hyps, 0].
     """
     p = self.params
     # additional_source_info is currently not used.
@@ -1053,10 +1056,11 @@ class TransformerDecoder(MTBaseDecoder):
 
     return initial_results, py_utils.NestedMap({
         'prefix_states': prefix_states,
-        'time_step': tf.zeros([batch_size, 1], dtype=tf.int32)
+        'time_step': 0
     })
 
   def _PreBeamSearchStepCallback(self,
+                                 theta,
                                  source_encs,
                                  source_paddings,
                                  step_ids,
@@ -1066,25 +1070,32 @@ class TransformerDecoder(MTBaseDecoder):
     """Returns logits for sampling ids and the next model states.
 
     Args:
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
       source_encs: A tensor of shape [src_len, src_batch, source_dim].
           Can be [time, batch, depth, num_layers] if is_transparent is set.
       source_paddings: A tensor of shape [src_len, src_batch].
       step_ids: A tensor of shape [tgt_batch, 1].
-      states: A NestedMap of tensors representing states that the clients
+      states: A `.NestedMap` of tensors representing states that the clients
           would like to keep track of for each of the active hyps.
       num_hyps_per_beam: Beam size.
-      additional_source_info: a NestedMap of tensors containing extra context
+      additional_source_info: a `.NestedMap` of tensors containing extra context
           information about the source that may be useful for decoding.
     Returns:
-      results: A NestedMap of beam search results.
-          atten_probs: The updated attention probs, of shape [tgt_batch,
-              src_len].
-          log_probs: Log prob for each of the tokens in the target vocab. This
-              is of shape [tgt_batch, vocab_size].
-      out_states: A NestedMap. The updated states.
-         source_encs: A tensor of shape [src_batch, src_len, source_dim].
-         source_paddings: A tensor of shape [src_batch, src_len].
-         target_ids: Updated list of decoded ids. [num_hyps, Num of decoded ids]
+      A tuple (results, out_states).
+        results: A `.NestedMap` of beam search results.
+          atten_probs:
+            The updated attention probs, of shape [tgt_batch, src_len].
+          log_probs:
+            Log prob for each of the tokens in the target vocab. This is of
+            shape [tgt_batch, vocab_size].
+        out_states: A `.NestedMap`. The updated states.
+           source_encs:
+             A tensor of shape [src_batch, src_len, source_dim].
+           source_paddings:
+             A tensor of shape [src_batch, src_len].
+           target_ids:
+             Updated list of decoded ids. [num_hyps, Num of decoded ids].
     """
     p = self.params
     # additional_source_info is currently not used.
@@ -1096,15 +1107,14 @@ class TransformerDecoder(MTBaseDecoder):
     new_states = states.Pack(states.Flatten())
 
     layer_out, updated_prefix_states = self.ExtendStep(
-        self.theta, source_encs, source_paddings,
-        tf.squeeze(step_ids, 1),
-        target_time[0][0], prefix_states)
+        theta, source_encs, source_paddings, tf.squeeze(step_ids, 1),
+        target_time, prefix_states)
 
     new_states.prefix_states = updated_prefix_states
     new_states.time_step = target_time + 1
 
     softmax_input = tf.reshape(layer_out, [-1, p.softmax.input_dim])
-    logits = self.softmax.Logits(self.theta.softmax, [softmax_input])
+    logits = self.softmax.Logits(theta.softmax, [softmax_input])
 
     num_hyps = py_utils.GetShape(step_ids)[0]
     source_len = py_utils.GetShape(source_encs)[0]
@@ -1127,6 +1137,7 @@ class TransformerDecoder(MTBaseDecoder):
     return bs_results, new_states
 
   def _PostBeamSearchStepCallback(self,
+                                  theta,
                                   source_encs,
                                   source_paddings,
                                   new_step_ids,
@@ -1140,6 +1151,6 @@ class TransformerDecoder(MTBaseDecoder):
                        source_paddings,
                        num_hyps_per_beam_override=0):
     return self.beam_search.BeamSearchDecode(
-        source_encs, source_paddings, num_hyps_per_beam_override,
+        self.theta, source_encs, source_paddings, num_hyps_per_beam_override,
         self._InitBeamSearchStateCallback, self._PreBeamSearchStepCallback,
         self._PostBeamSearchStepCallback)

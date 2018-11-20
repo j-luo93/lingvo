@@ -1,15 +1,11 @@
-package(default_visibility = ["//lingvo/core/ops:__pkg__"])
+package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])  # Apache 2.0
-
-package_group(
-    name = "friends",
-    packages = ["//lingvo/core/..."],
-)
 
 filegroup(
     name = "best_step_testdata",
     data = [
+        "events.out.tfevents.test",
         "history.txt",
         "history_bleu.txt",
     ],
@@ -25,10 +21,19 @@ filegroup(
     data = ["test_ngrams.txt"],
 )
 
+filegroup(
+    name = "bpe_words_vocab",
+    data = ["bpe_words.vocab"],
+)
+
+filegroup(
+    name = "bpe_codes_vocab",
+    data = ["bpe_codes.vocab"],
+)
+
 # Data from "Findings of the 2014 Workshop on Statistical Machine Translation"
 # http://www.aclweb.org/anthology/W14-3302
 filegroup(
     name = "wmt",
     data = glob(["wmt/*"]),
-    visibility = [":friends"],
 )

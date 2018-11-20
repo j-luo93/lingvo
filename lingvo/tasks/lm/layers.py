@@ -42,7 +42,7 @@ def get_basis_init(p, shape):
     return init
     
 
-class BaseLanguageModel(base_layer.LayerBase):
+class BaseLanguageModel(base_layer.BaseLayer):
   """Abstract base class for a language model layer."""
 
   @classmethod
@@ -62,18 +62,17 @@ class BaseLanguageModel(base_layer.LayerBase):
     """Computes xent loss given the language model inputs.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: a tensor of shape [time, batch] or [time, batch, dims].
       paddings: a 0/1 tensor of shape [time, batch].
-      state0: A NestedMap containing the initial recurrent state.
+      state0: A `.NestedMap` containing the initial recurrent state.
       *args: optional extra arguments.
       **kwargs: optional extra keyword arguments.
 
     Returns:
-      (xent_output, state1). xent_output is a NestedMap as defined by
-      SoftmaxLayer's return value and state1 is the next recurrent
-      state.
+      (xent_output, state1). `xent_output` is a `.NestedMap` as defined by
+      `SoftmaxLayer`'s return value and `state1` is the next recurrent state.
     """
     raise NotImplementedError('Abstract method')
 
@@ -90,15 +89,17 @@ class BaseLanguageModel(base_layer.LayerBase):
 
   @classmethod
   def StepOutputDimension(cls, params):
-    """Returns dimensions of Step()'s output dimension.
+    """Returns dimensions of `Step()`'s output dimension.
 
     Args:
       params: Params for this layer.
 
     Returns:
-      output_dims: A NestedMap with fields.
-        logits: a python int. the vocab size.
-        last_hidden: a python int. The last hidden layer's dimension.
+      A `.NestedMap` with fields
+        logits: a python int.
+            The vocab size.
+        last_hidden: a python int.
+            The last hidden layer's dimension.
     """
     raise NotImplementedError('Abstract method')
 
@@ -106,20 +107,25 @@ class BaseLanguageModel(base_layer.LayerBase):
     """FProp one step.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: a tensor of shape [batch] or [batch, dims].
       paddings: a 0/1 tensor of shape [batch].
-      state0: A NestedMap containing the initial recurrent state.
+      state0: A `.NestedMap` containing the initial recurrent state.
       *args: optional extra arguments.
       **kwargs: optional extra keyword arguments.
 
     Returns:
-      output: A NestedMap with fields.
-        logits: [batch, vocab_size].
-        log_probs: [batch, vocab_size].
-        last_hidden: [batch, dims].
-      state1: The new recurrent state.
+      A tuple (output, state1).
+        output: A `.NestedMap` with fields.
+          logits:
+            [batch, vocab_size].
+          log_probs:
+            [batch, vocab_size].
+          last_hidden:
+            [batch, dims].
+        state1:
+          The new recurrent state.
     """
 
     def ExpandTime(x):
@@ -174,7 +180,7 @@ class NullLm(BaseLanguageModel):
 
   @classmethod
   def StepOutputDimension(cls, params):
-    """Returns dimensions of Step()'s output dimension."""
+    """Returns dimensions of `Step()`'s output dimension."""
     return py_utils.NestedMap(logits=params.vocab_size, last_hidden=0)
 
   def Step(self, theta, inputs, paddings, state0, *args, **kwargs):
@@ -228,6 +234,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
     p = self.params
     if not isinstance(p.rnns.cell_tpl, (list, tuple)):
       p.rnns.cell_tpl = [p.rnns.cell_tpl]
+    p.rnns.allow_implicit_capture = p.allow_implicit_capture
 
     cell_output_size = _RnnOutputSize(p.rnns)
     output_layer_size = cell_output_size + p.direct_features_dim
@@ -321,22 +328,25 @@ class RnnLmNoEmbedding(BaseLanguageModel):
     """FProp one step.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: a tensor of shape [batch] or [batch, dims].
       paddings: a 0/1 tensor of shape [batch].
-      state0: A NestedMap containing the initial recurrent state.
-      direct_features: If not None, a tensor of[batch,
-        direct_feature_dims] that is concatenated to the output of the last
-        RNN layer.
+      state0: A `.NestedMap` containing the initial recurrent state.
+      direct_features: If not None, a tensor of [batch, direct_feature_dims]
+        that is concatenated to the output of the last RNN layer.
       *args: optional extra arguments.
       **kwargs: optional extra keyword arguments.
 
     Returns:
-      output: A NestedMap with fields.
-        logits: [batch, vocab_size].
-        last_hidden: [batch, dims].
-      state1: The new recurrent state.
+      A tuple (output, state1).
+        output: A `.NestedMap` with fields.
+          logits:
+            [batch, vocab_size].
+          last_hidden:
+            [batch, dims].
+        state1:
+          The new recurrent state.
     """
 
     def ExpandTime(x):
@@ -382,27 +392,29 @@ class RnnLmNoEmbedding(BaseLanguageModel):
     """Computes xent loss given the language model input activations.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: input activation. A tensor of shape [time, batch, dims].
       paddings: a 0/1 tensor of shape [time, batch].
-      state0: A NestedMap containing the initial recurrent state.
-      labels: If not None, a NestedMap contains the following fields:
-        class_weights - a tensor with shape [time, batch] containing
-          the weights for each target word.
-        class_ids - a tensor with shape [time, batch] of int32 dtype
-          containing the target class labels.
-        class_probabilities - a tensor with shape [time, batch, vocab_size]
-          of float values indicating class-membership probabilities.
-      direct_features: If not None, a tensor of[time, batch,
-        direct_feature_dims] that is concatenated to the output of the last
-        RNN layer.
+      state0: A `.NestedMap` containing the initial recurrent state.
+      labels: If not None, a `.NestedMap` containing the following fields.
+
+        - class_weights, a tensor with shape [time, batch] containing the
+          weights for each target word.
+        - class_ids, a tensor with shape [time, batch] of int32 dtype containing
+          the target class labels.
+        - class_probabilities, a tensor with shape [time, batch, vocab_size] of
+          float values indicating class-membership probabilities.
+      direct_features:
+        If not None, a tensor of [time, batch, direct_feature_dims] that is
+        concatenated to the output of the last RNN layer.
 
     Returns:
-      If labels is not None, returns (xent_output, state1), where
-      xent_output is a NestedMap as defined by SoftmaxLayer's return
-      value and state1 is the next recurrent state. Otherwise,
-      xent_output only contains the softmax logits.
+      If `labels` is not None, returns (xent_output, state1), where
+      `xent_output` is a `.NestedMap` as defined by `SoftmaxLayer`'s return
+      value and `state1` is the next recurrent state. Otherwise,
+      `xent_output` contains the softmax logits, probabilities (.probs) and
+      log-probabilities (.log_probs).
     """
     inputs = py_utils.HasRank(inputs, 3)
     seqlen, batch, _ = tf.unstack(tf.shape(inputs), num=3)
@@ -697,11 +709,11 @@ class RnnLm(RnnLmNoEmbedding):
         higher index layers also have residuals.
       softmax_max_alloc: If set to a positive integer the soft-max
         computation is chunked into allocations of at most
-        softmax_max_alloc; when left to its default value of None no
+        `softmax_max_alloc`; when left to its default value of None no
         chunking is done.
 
     Returns:
-      A RnnLm parameter object.
+      A `RnnLm` parameter object.
     """
     p = cls.Params()
     p.vocab_size = vocab_size
@@ -774,27 +786,28 @@ class RnnLm(RnnLmNoEmbedding):
     """Computes xent loss given the language model input activations.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: input ids. An int32 tensor of shape [time, batch].
       paddings: a 0/1 tensor of shape [time, batch].
-      state0: A NestedMap containing the initial recurrent state.
-      labels: If not None, a NestedMap contains the following fields:
-        class_weights - a tensor with shape [time, batch] containing
-          the weights for each target word.
-        class_ids - a tensor with shape [time, batch] of int32 dtype
-          containing the target class labels.
-        class_probabilities - a tensor with shape [time, batch, vocab_size]
-          of float values indicating class-membership probabilities.
-      direct_features: If not None, a tensor of[time, batch,
-        direct_feature_dims] that is concatenated to the output of the last
-        RNN layer.
+      state0: A `.NestedMap` containing the initial recurrent state.
+      labels: If not None, a `.NestedMap` containing the following fields:
+
+        - class_weights, a tensor with shape [time, batch] containing the
+          weights for each target word.
+        - class_ids, a tensor with shape [time, batch] of int32 dtype containing
+          the target class labels.
+        - class_probabilities, a tensor with shape [time, batch, vocab_size] of
+          float values indicating class-membership probabilities.
+      direct_features:
+        If not None, a tensor of [time, batch, direct_feature_dims] that is
+        concatenated to the output of the last RNN layer.
 
     Returns:
-      If labels is not None, returns (xent_output, state1), where
-      xent_output is a NestedMap as defined by SoftmaxLayer's return
-      value and state1 is the next recurrent state. Otherwise,
-      xent_output only contains the softmax logits.
+      If `labels` is not None, returns (xent_output, state1), where
+      `xent_output` is a `.NestedMap` as defined by `SoftmaxLayer`'s return
+      value and `state1` is the next recurrent state. Otherwise,
+      `xent_output` only contains the softmax logits.
     """
     p = self.params
     ids = py_utils.HasRank(inputs, 2)
@@ -1044,10 +1057,6 @@ class TransformerLmNoEmbedding(BaseLanguageModel):
         'sub-layer.')
     p.Define('softmax', layers.SimpleFullSoftmax.Params(),
              'The softmax layer params.')
-    p.Define(
-        'random_seed', None,
-        'If set, this decides the random seed to apply in various random '
-        'ops. Set this random_seed only for unittests.')
 
     # Default config for the transformer layers.
     p.trans_tpl.is_decoder = False
@@ -1073,7 +1082,7 @@ class TransformerLmNoEmbedding(BaseLanguageModel):
       self.CreateChild('position_emb', p.position_emb)
 
       dropout_tpl = layers.DropoutLayer.Params().Set(
-          keep_prob=(1.0 - p.input_dropout_prob), seed=p.random_seed)
+          keep_prob=(1.0 - p.input_dropout_prob))
       self.CreateChild('input_dropout', dropout_tpl)
 
       params_trans_layers = []
@@ -1081,7 +1090,6 @@ class TransformerLmNoEmbedding(BaseLanguageModel):
         params = p.trans_tpl.Copy()
         params.source_dim = p.model_dim
         params.name = 'layer_%d' % i
-        params.random_seed = p.random_seed
         params_trans_layers.append(params)
       self.CreateChildren('trans', params_trans_layers)
 
@@ -1107,19 +1115,23 @@ class TransformerLmNoEmbedding(BaseLanguageModel):
     """FProp one step.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: a tensor of shape [batch, model_dim].
       paddings: a 0/1 tensor of shape [batch]. Unused here.
-      state0: A NestedMap containing the prefix states up to step t-1.
+      state0: A `.NestedMap` containing the prefix states up to step t-1.
       *args: optional extra arguments.
       **kwargs: optional extra keyword arguments.
 
     Returns:
-      output: A NestedMap with fields.
-        logits: [batch, vocab_size].
-        last_hidden: [batch, model_dim].
-      state1: The updated prefix states including step t.
+      A tuple (output, state1).
+        output: A `.NestedMap` with fields.
+          logits:
+            [batch, vocab_size].
+          last_hidden:
+            [batch, model_dims].
+        state1:
+          The updated prefix states including step t.
     """
 
     _, prefix_len = py_utils.GetShape(state0['layer_0'].key, 2)
@@ -1152,23 +1164,24 @@ class TransformerLmNoEmbedding(BaseLanguageModel):
     """Computes xent loss given the language model input activations.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: Input activation. A tensor of shape [time, batch, model_dim].
       paddings: A 0/1 tensor of shape [time, batch].
       state0: Not used for Transformer.
-      labels: If not None, a NestedMap contains the following fields:
-        class_weights - a tensor with shape [time, batch] containing
-          the weights for each target word.
-        class_ids - a tensor with shape [time, batch] of int32 dtype
-          containing the target class labels.
-        class_probabilities - a tensor with shape [time, batch, vocab_size]
-          of float values indicating class-membership probabilities.
+      labels: If not None, a `.NestedMap` containing the following fields:
+
+        - class_weights, a tensor with shape [time, batch] containing the
+          weights for each target word.
+        - class_ids, a tensor with shape [time, batch] of int32 dtype containing
+          the target class labels.
+        - class_probabilities, a tensor with shape [time, batch, vocab_size] of
+          float values indicating class-membership probabilities.
 
     Returns:
-      If labels is not None, returns (xent_output, None), where
-      xent_output is a NestedMap as defined by SoftmaxLayer's return
-      value. Otherwise, xent_output only contains the softmax logits.
+      If `labels` is not None, returns (xent_output, None), where
+      `xent_output` is a `.NestedMap` as defined by `SoftmaxLayer`'s return
+      value. Otherwise, `xent_output` only contains the softmax logits.
     """
     p = self.params
     inputs = py_utils.HasRank(inputs, 3)
@@ -1325,24 +1338,25 @@ class TransformerLm(TransformerLmNoEmbedding):
     """Computes xent loss given the language model input activations.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: Input ids. An int32 tensor of shape [time, batch].
       paddings: A 0/1 tensor of shape [time, batch].
       state0: Not used for Transformer.
-      labels: If not None, a NestedMap contains the following fields:
-        class_weights - a tensor with shape [time, batch] containing
-          the weights for each target word.
-        class_ids - a tensor with shape [time, batch] of int32 dtype
-          containing the target class labels.
-        class_probabilities - a tensor with shape [time, batch, vocab_size]
-          of float values indicating class-membership probabilities.
+      labels: If not None, a `.NestedMap` containing the following fields:
+
+        - class_weights, a tensor with shape [time, batch] containing the
+          weights for each target word.
+        - class_ids, a tensor with shape [time, batch] of int32 dtype containing
+          the target class labels.
+        - class_probabilities, a tensor with shape [time, batch, vocab_size] of
+          float values indicating class-membership probabilities.
 
     Returns:
-      If labels is not None, returns (xent_output, state1), where
-      xent_output is a NestedMap as defined by SoftmaxLayer's return
-      value and state1 is the next recurrent state. Otherwise,
-      xent_output only contains the softmax logits.
+      If `labels` is not None, returns (xent_output, state1), where
+      `xent_output` is a `.NestedMap` as defined by `SoftmaxLayer`'s return
+      value and `state1` is the next recurrent state. Otherwise,
+      `xent_output` only contains the softmax logits.
     """
     ids = py_utils.HasRank(inputs, 2)
     paddings = py_utils.HasShape(paddings, tf.shape(ids))
@@ -1350,7 +1364,7 @@ class TransformerLm(TransformerLmNoEmbedding):
     return super(TransformerLm, self).FProp(
         theta, activation, paddings, labels=labels)
 
-class HRREmbeddingLayer(base_layer.LayerBase):
+class HRREmbeddingLayer(base_layer.BaseLayer):
   """HRR embedding layer"""
 
   @classmethod

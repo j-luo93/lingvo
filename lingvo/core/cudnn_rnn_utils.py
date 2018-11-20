@@ -124,6 +124,7 @@ def _StitchWeights(w_i, w_f, w_c, w_o,
 
   LSTMCellSimple uses a single weight Tensor of shape [input_dim, 4 * cell_dim].
   This method puts the weight tensors together.
+
   Args:
     w_i:
     w_f:
@@ -137,6 +138,7 @@ def _StitchWeights(w_i, w_f, w_c, w_o,
       weights applied on recurrent input.
     input_dim: an int, LSTM input dim.
     cell_dim: an int, LSTM cell dim.
+
   Returns:
     A weight Tensor.
   """
@@ -164,6 +166,7 @@ def _StitchBiases(b_wi, b_wf, b_wc, b_wo,
 
   LSTMCellSimple uses a single bias Tensor of shape [4 * cell_dim]. This method
   puts the bias tensors together.
+
   Args:
     b_wi:
     b_wf:
@@ -175,8 +178,9 @@ def _StitchBiases(b_wi, b_wf, b_wc, b_wo,
     b_rc:
     b_ro:
       biases applied on recurrent input.
+
   Returns:
-   A bias Tensor.
+    A bias Tensor.
   """
   return (
       tf.concat([b_wc, b_wi, b_wf, b_wo], axis=0) +
@@ -196,13 +200,13 @@ def _CuDNNParamsToCanonical(cudnn_params, input_dim, cell_dim, direction):
       cudnn_rnn_ops.CUDNN_RNN_BIDIRECTION.
   Returns:
     A list of weight Tensor and a list of bias Tensor, in the order they appear
-    in input \'cudnn_params\', described above.
+    in input `cudnn_params`, described above.
   Raises:
-    ValueError: for invalid \'direction\'.
+    ValueError: for invalid `direction`.
   """
   if direction not in (UNI_RNN, BI_RNN):
-    raise ValueError('\'direction\' must be %s or %s, receive %s.',
-                     UNI_RNN, BI_RNN)
+    raise ValueError('\'direction\' must be %s or %s, receive %s.' %
+                     (UNI_RNN, BI_RNN, direction))
   cudnn_initializer = CuDNNLSTMInitializer(input_dim, cell_dim, direction)
   weights, biases = tf.split(cudnn_params,
                              [cudnn_initializer.weight_size,
@@ -228,13 +232,13 @@ def RecoverLSTMCellSimpleWeightsFromCuDNN(cudnn_params, input_dim, cell_dim,
   Returns:
     A list of weight Tensor and a list of bias Tensor.
   Raises:
-    ValueError: for invalid \'direction\'.
+    ValueError: for invalid `direction`.
   """
   if direction not in (cudnn_rnn_ops.CUDNN_RNN_UNIDIRECTION,
                        cudnn_rnn_ops.CUDNN_RNN_BIDIRECTION):
-    raise ValueError('\'direction\' must be %s or %s, receive %s.',
-                     cudnn_rnn_ops.CUDNN_RNN_UNIDIRECTION,
-                     cudnn_rnn_ops.CUDNN_RNN_BIDIRECTION)
+    raise ValueError('\'direction\' must be %s or %s, receive %s.' %
+                     (cudnn_rnn_ops.CUDNN_RNN_UNIDIRECTION,
+                      cudnn_rnn_ops.CUDNN_RNN_BIDIRECTION, direction))
   weights, biases = _CuDNNParamsToCanonical(cudnn_params, input_dim, cell_dim,
                                             direction)
   if direction == cudnn_rnn_ops.CUDNN_RNN_UNIDIRECTION:
@@ -272,6 +276,25 @@ def RecoverLSTMCellSimpleWeightsFromCuDNN(cudnn_params, input_dim, cell_dim,
     return (fwd_w, bak_w), (fwd_b, bak_b)
 
 
+class CudNNParamsFormatConverterLSTM(
+    cudnn_rnn_ops.CudnnParamsFormatConverterLSTM):
+  r"""Lingvo CuDNN LSTM params converter.
+
+  Used by Lingvo CuDNNLSTMSaveable to convert between Cudnn and Lingvo LSTM
+  formats.
+  """
+
+  def _cudnn_to_tf_gate_params(self, *cu_gate_order):
+    """Put CuDNN gate params to lingvo RNN cell order."""
+    i_g, f_g, c_g, o_g = cu_gate_order
+    return [c_g, i_g, f_g, o_g]
+
+  def _tf_to_cudnn_gate_params(self, *tf_gate_order):
+    """Put lingvo RNN cell gate params to CuDNN order."""
+    c_g, i_g, f_g, o_g = tf_gate_order
+    return [i_g, f_g, c_g, o_g]
+
+
 class CuDNNLSTMSaveable(tf.contrib.cudnn_rnn.CudnnLSTMSaveable):
   r"""Lingvo CuDNN LSTM opaque params saveable.
 
@@ -279,34 +302,68 @@ class CuDNNLSTMSaveable(tf.contrib.cudnn_rnn.CudnnLSTMSaveable):
   checkpoints can be used by both CuDNN and platform-independent RNN cells.
 
   CuDNN LSTM equation:
-    i_t = σ(w_i * x_t + r_i * h_(t-1) + b_wi + b_ri)
-    f_t = σ(w_f * x_t + r_f * h_(t-1) + b_wf + b_rf)
-    o_t = σ(w_o * x_t + r_o h_(t-1) + b_wo + b_ro)
-    c'_t = tanh(w_c * x_t + r_c * h_(t-1) + b_wc + b_rc)
-    c_t = f_t ◦ c_(t-1) + i_t ◦ c'_t
-    h_t = o_t ◦ tanh(c_t)
+
+      | i_t = σ(w_i * x_t + r_i * h_(t-1) + b_wi + b_ri)
+      | f_t = σ(w_f * x_t + r_f * h_(t-1) + b_wf + b_rf)
+      | o_t = σ(w_o * x_t + r_o h_(t-1) + b_wo + b_ro)
+      | c'_t = tanh(w_c * x_t + r_c * h_(t-1) + b_wc + b_rc)
+      | c_t = f_t ◦ c_(t-1) + i_t ◦ c'_t
+      | h_t = o_t ◦ tanh(c_t)
 
   When saving, the opaque param is first transformed into a list of tensors
   in CuDNN canonical format, then further processed to be in the format of
   LSTMCellSimple vars.
+
   When recovering from a CuDNN graph, the restored tensors go through the
   reverse of the aforementioned process.
+
   When recovering from graphs built with LSTMCellSimple, the tensors in the
   checkpoints are ready to use, with the right shapes and names.
 
   Specifically the tensors are saved in the following order:
-  ------------------------------------------------------------
-  | weights                    | biases                      |
-  ------------------------------------------------------------
-   \                             \
-    -------------------------------
-    | layer1     |layer2     |... |
-    -------------------------------
-    \             \
-     ---------------
-     |fwd   |bak   |
-     ---------------
+
+  .. code-block:: none
+
+      ------------------------------------------------------------
+      | weights                    | biases                      |
+      ------------------------------------------------------------
+       \                             \
+        -------------------------------
+        | layer1     |layer2     |... |
+        -------------------------------
+        \             \
+         ---------------
+         |fwd   |bak   |
+         ------------
+
+  Conceptually, for each layer, cudnn lstm has the following params and layout:
+
+  .. code-block:: none
+
+      -------------------------------------------------
+      | w_i | w_f | w_c | w_o | r_i | r_f | r_c | r_o |
+      -------------------------------------------------
+      ---------------------------------------------------------
+      | b_wi | b_wf | b_wc | b_wo | b_ri | b_rf | b_rc | b_ro |
+      ---------------------------------------------------------
+
+  While Lingvo LSTM params and layout is the following:
+
+  .. code-block:: none
+
+      -----------------------------
+      | w_c' | w_i' | w_f' | w_o' |
+      | r_c' | r_i' | r_f' | r_o' |
+      -----------------------------
+      ---------------------------------------------------------
+      | b_wc + b_rc | b_wi + b_ri | b_wf + b_rf | b_wo + b_ro |
+      ---------------------------------------------------------
+
+  The shapes of each element before transpose is reflected by
+  `CuDNNLSTMInitializer.{weight_shapes, biase_shapes}`.
   """
+
+  _format_converter_cls = CudNNParamsFormatConverterLSTM
 
   def __init__(self,
                opaque_params,
@@ -338,60 +395,20 @@ class CuDNNLSTMSaveable(tf.contrib.cudnn_rnn.CudnnLSTMSaveable):
         scope=scope,
         name=name)
 
-  def _TransformSingleLayerCanonical(self, cu_wts, cu_bs, prefix, tf_wts,
-                                     tf_wts_names, tf_bs, tf_bs_names):
+  def _tf_canonical_names_single_layer(self, prefix, tf_wts_names, tf_bs_names):
     r"""Transform single layer Cudnn canonicals to tf canonicals.
 
-    The elements of cu_weights, cu_biases are laid out in the following order:
-    -------------------------------------------------
-    | w_i | w_f | w_c | w_o | r_i | r_f | r_c | r_o |
-    -------------------------------------------------
-    ---------------------------------------------------------
-    | b_wi | b_wf | b_wc | b_wo | b_ri | b_rf | b_rc | b_ro |
-    ---------------------------------------------------------
-
-    The transformed canonicals are in the following format and order:
-    -----------------------------
-    | w_c' | w_i' | w_f' | w_o' |
-    | r_c' | r_i' | r_f' | r_o' |
-    -----------------------------
-    ---------------------------------------------------------
-    | b_wc + b_rc | b_wi + b_ri | b_wf + b_rf | b_wo + b_ro |
-    ---------------------------------------------------------
-
-    The shapes of each element before transpose is reflected by
-    `CuDNNLSTMInitializer.{weight_shapes, biase_shapes}`.
-
     Args:
-      cu_wts: a list of tensors, single layer weights.
-      cu_bs: a list of tensors, single layer biases.
       prefix: the shared prefix of all tensor names.
-      tf_wts: a list where transformed weights are stored.
       tf_wts_names: a list where names of transformed weights are stored.
-      tf_bs: a list where transformed biases are stored.
       tf_bs_names: a list where names of transformed biases are stored.
     """
-    (w,) = self._cudnn_to_tf_weights(*cu_wts)
-    (b,) = self._cudnn_to_tf_biases(*cu_bs)
-
-    tf_wts.append(w)
     tf_wts_names.append(prefix + '/wm/var')
-
-    tf_bs.append(b)
     tf_bs_names.append(prefix + '/b/var')
 
-  def _cudnn_to_tf_gate_params(self, *cu_gate_order):
-    """Put CuDNN gate params to lingvo RNN cell order."""
-    i_g, f_g, c_g, o_g = cu_gate_order
-    return [c_g, i_g, f_g, o_g]
-
-  def _tf_to_cudnn_gate_params(self, *tf_gate_order):
-    """Put lingvo RNN cell gate params to CuDNN order."""
-    c_g, i_g, f_g, o_g = tf_gate_order
-    return [i_g, f_g, c_g, o_g]
-
-  def _TFCanonicalNamePrefix(self, layer, unused_is_fwd=True):
+  def _tf_canonical_name_prefix(self, layer, is_fwd=True):
     """The prefix of names under which lingvo canonical params are saved."""
+    del is_fwd
     # Lingvo only uses single layer.
     assert layer == 0
     return self._rnn_cell_name
@@ -433,7 +450,7 @@ class BidiCuDNNLSTMSaveable(CuDNNLSTMSaveable):
         scope=scope,
         name=name)
 
-  def _TFCanonicalNamePrefix(self, layer, is_fwd=True):
+  def _tf_canonical_name_prefix(self, layer, is_fwd=True):
     """The prefix of names under which lingvo canonical params are saved."""
     # Lingvo only uses single layer.
     assert layer == 0

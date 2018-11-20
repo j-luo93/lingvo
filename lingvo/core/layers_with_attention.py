@@ -25,11 +25,8 @@ from lingvo.core import base_layer
 from lingvo.core import layers
 from lingvo.core import py_utils
 
-assert_equal = py_utils.assert_equal
-assert_shape_match = py_utils.assert_shape_match
 
-
-class TransformerAttentionLayer(base_layer.LayerBase):
+class TransformerAttentionLayer(base_layer.BaseLayer):
   """Multi-headed attention, add and norm used by 'Attention Is All You Need'.
 
   This class implements the first sub-layer of Transformer Layer. Input is
@@ -38,22 +35,21 @@ class TransformerAttentionLayer(base_layer.LayerBase):
   output is normalized using Layer Normalization.
 
   Layer can be used in three scenarios:
+
   1. Multi-Headed Self-Attention, where attention keys (source vectors),
-  attention values (context vectors) and queries come from the same previous
-  layer output, `query_vec`. This is the general use case for encoder
-  Transformer Layers.
-
+     attention values (context vectors) and queries come from the same previous
+     layer output, `query_vec`. This is the general use case for encoder
+     Transformer Layers.
   2. Masked Multi-Headed Self-Attention, where attention keys, attention values
-  and queries all come from the same previous layer output, but rightward
-  activations are masked to prevent information flow from future. This is the
-  use case for decoder self-attention Transformer Layers. Can be activated by
-  setting is_masked flag of this layer.
-
+     and queries all come from the same previous layer output, but rightward
+     activations are masked to prevent information flow from future. This is the
+     use case for decoder self-attention Transformer Layers. Can be activated by
+     setting is_masked flag of this layer.
   3. Multi-Headed Attention, where attention keys and attention values
-  `source_vecs`, are coming from a different source (output of the encoder) and
-  queries `query_vec`, coming from the previous layer outputs (decoder). This
-  corresponds to the standard attention mechanism, decoder attending the encoder
-  outputs.
+     `source_vecs`, are coming from a different source (output of the encoder)
+     and queries `query_vec`, coming from the previous layer outputs (decoder).
+     This corresponds to the standard attention mechanism, decoder attending the
+     encoder outputs.
   """
 
   @classmethod
@@ -80,11 +76,6 @@ class TransformerAttentionLayer(base_layer.LayerBase):
         'residual_dropout_tpl', layers.DropoutLayer.Params(),
         'Residual dropout params template. keep_prop will be reset to '
         '(1.0 - residual_dropout_prob).')
-    p.Define(
-        'random_seed', None,
-        'If set, this decides the random seed to apply in various random'
-        ' ops (attention, residual, feed-forward) such that this layer is'
-        ' deterministic. Set this random_seed only for unittests.')
     p.Define('packed_input', False,
              'If True, each training example may pack multiple sequences.')
     return p
@@ -107,7 +98,6 @@ class TransformerAttentionLayer(base_layer.LayerBase):
       params.ctx_post_proj_dim = p.source_dim
       params.num_attention_heads = p.num_attention_heads
       params.atten_dropout_prob = p.atten_dropout_prob
-      params.random_seed = p.random_seed
       params.packed_input = p.packed_input
       self.CreateChild('atten', params)
 
@@ -119,7 +109,6 @@ class TransformerAttentionLayer(base_layer.LayerBase):
 
       dropout_tpl = p.residual_dropout_tpl.Copy()
       dropout_tpl.keep_prob = (1.0 - p.residual_dropout_prob)
-      dropout_tpl.seed = p.random_seed
       self.CreateChild('residual_dropout', dropout_tpl)
 
   def FProp(self,
@@ -132,7 +121,7 @@ class TransformerAttentionLayer(base_layer.LayerBase):
     """Transformer attention, residual and normalization layer.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       query_vec: [target_time, target_batch, dim]
       source_paddings: [source_time, source_batch]
@@ -140,7 +129,7 @@ class TransformerAttentionLayer(base_layer.LayerBase):
       query_segment_id: [target_time, target_batch]
       source_segment_id: [source_time, source_batch]
     Returns:
-      (output, atten_probs): output is of shape [target_time, target_batch,
+      (output, atten_probs). output is of shape [target_time, target_batch,
       source_dim], atten_probs is of shape [target_time, target_batch,
       source_time].
     """
@@ -153,15 +142,16 @@ class TransformerAttentionLayer(base_layer.LayerBase):
 
     if p.is_masked:
       assert source_vecs is not None
-      query_vec = py_utils.with_dependencies(
-          [assert_shape_match(tf.shape(source_vecs), tf.shape(query_vec))],
-          query_vec)
+      query_vec = py_utils.with_dependencies([
+          py_utils.assert_shape_match(
+              tf.shape(source_vecs), tf.shape(query_vec))
+      ], query_vec)
       # Prepares mask for self-attention
       # [time, time]
       target_time = tf.shape(query_vec)[0]
       target_bs = tf.shape(query_vec)[1]
       triangle_padding = 1.0 - tf.matrix_band_part(
-          tf.ones([target_time, target_time], dtype=layers.FPropDtype(p)), -1,
+          tf.ones([target_time, target_time], dtype=py_utils.FPropDtype(p)), -1,
           0)
       # [time,  batch, time]
       causal_padding = tf.tile(
@@ -172,19 +162,14 @@ class TransformerAttentionLayer(base_layer.LayerBase):
       causal_padding = None
 
     query_dim = tf.shape(query_vec)[-1]
-    (concated_source_vecs, concated_source_contexts,
-     source_padding, source_segment_id) = self.atten.PackSource(
-         theta.atten, source_vecs, source_vecs, source_paddings,
-         source_segment_id)
+    packed_src = self.atten.PackSource(theta.atten, source_vecs, source_vecs,
+                                       source_paddings, source_segment_id)
 
     if query_segment_id is not None:
       query_segment_id = tf.reshape(query_segment_id, [-1])
     ctx_vec, atten_prob, _ = self.atten.ComputeContextVectorWithSource(
         theta.atten,
-        concated_source_vecs,
-        concated_source_contexts,
-        source_padding,
-        source_segment_id,
+        packed_src,
         tf.reshape(query_vec, [-1, query_dim]),
         per_step_source_padding=causal_padding,
         query_segment_id=query_segment_id)
@@ -204,7 +189,7 @@ class TransformerAttentionLayer(base_layer.LayerBase):
     Transformer model.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       query_vec: [target_batch, dim]
       prefix_state: dict, containing tensors which are the results of previous
@@ -212,30 +197,31 @@ class TransformerAttentionLayer(base_layer.LayerBase):
     Returns:
       A triplet (cur_output, atten_prob, new_state) where cur_output is a tensor
       representing the output from the current state, and new_state is the new
-      state NestedMap.
+      state `.NestedMap`.
     """
     p = self.params
     assert p.is_masked  # Must be causal attention.
     query_vec = self.layer_norm.FProp(theta.layer_norm, query_vec)
 
-    cached_source_vecs = prefix_state.key
-    cached_source_contexts = prefix_state.value
-    (extended_source_vecs,
-     extended_source_contexts, _, _) = self.atten.ExtendSourcePacked(
-         theta.atten, query_vec, query_vec, None, None, cached_source_vecs,
-         cached_source_contexts, None, None)
+    cached_packed_src = py_utils.NestedMap(
+        source_vecs=prefix_state.key,
+        source_contexts=prefix_state.value,
+        source_padding=None,
+        source_segment_id=None)
+    extended_packed_src = self.atten.ExtendSourcePacked(
+        theta.atten, query_vec, query_vec, None, None, cached_packed_src)
     ctx_vec, atten_prob, _ = self.atten.ComputeContextVectorWithCachedSource(
-        theta.atten, extended_source_vecs, extended_source_contexts, None, None,
-        query_vec)
+        theta.atten, extended_packed_src, query_vec)
 
     ctx_vec = self.residual_dropout.FProp(theta.residual_dropout, ctx_vec)
     h = query_vec + tf.reshape(ctx_vec, tf.shape(query_vec))
     new_states = py_utils.NestedMap(
-        key=extended_source_vecs, value=extended_source_contexts)
+        key=extended_packed_src.source_vecs,
+        value=extended_packed_src.source_contexts)
     return h, atten_prob, new_states
 
 
-class TransformerFeedForwardLayer(base_layer.LayerBase):
+class TransformerFeedForwardLayer(base_layer.BaseLayer):
   """Feed-forward, add and norm layer used by 'Attention Is All You Need'.
 
   This class implements the second sub-layer of Transformer Layer. First,
@@ -271,10 +257,6 @@ class TransformerFeedForwardLayer(base_layer.LayerBase):
         'relu_dropout_prob', 0.0,
         'Probability at which we apply dropout to the hidden layer '
         'of feed-forward network.')
-    p.Define(
-        'random_seed', None,
-        'If set, this decides the random seed to apply in dropout.'
-        ' Set this random_seed only for unittests.')
     return p
 
   @base_layer.initializer
@@ -303,8 +285,10 @@ class TransformerFeedForwardLayer(base_layer.LayerBase):
           pj.activation = 'NONE'
           self.CreateChild('res_proj_layer', pj)
 
-      params.dropout_prob = [p.relu_dropout_prob, 0.0]
-      params.dropout_random_seed = p.random_seed
+      params.dropout = [
+          params.dropout.cls.Params().Set(keep_prob=1.0 - p.relu_dropout_prob),
+          params.dropout.cls.Params().Set(keep_prob=1.0)
+      ]
       self.CreateChild('fflayer', params)
 
       # Initialize feed-forward layer norm
@@ -315,14 +299,13 @@ class TransformerFeedForwardLayer(base_layer.LayerBase):
 
       dropout_tpl = p.residual_dropout_tpl.Copy()
       dropout_tpl.keep_prob = (1.0 - p.residual_dropout_prob)
-      dropout_tpl.seed = p.random_seed
       self.CreateChild('residual_dropout', dropout_tpl)
 
   def FProp(self, theta, inputs, paddings):
     """Feed-forward, residual and layer-norm.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: [time, batch, dim].
       paddings: [time, batch]
@@ -339,7 +322,7 @@ class TransformerFeedForwardLayer(base_layer.LayerBase):
     return h
 
 
-class TransformerLayer(base_layer.LayerBase):
+class TransformerLayer(base_layer.BaseLayer):
   """Transformer Layer proposed by 'Attention Is All You Need'.
 
   Applies self-attention followed by a feed forward network and
@@ -368,10 +351,6 @@ class TransformerLayer(base_layer.LayerBase):
         'is_decoder', False,
         'If set, introduces a second attention layer, which attends to'
         ' the auxiliary source contexts.')
-    p.Define(
-        'random_seed', None,
-        'If set, this decides the random seed to apply in dropout.'
-        ' Set this random_seed only for unittests.')
     p.Define('tr_aux_atten_tpl', None, 'Transformer Attention Layer params.')
     p.Define(
         'mask_self_atten', False, 'If True, use masked self-attention. '
@@ -394,7 +373,6 @@ class TransformerLayer(base_layer.LayerBase):
       params.name = 'multihead_self_atten'
       params.source_dim = p.source_dim
       params.packed_input = p.packed_input
-      params.random_seed = p.random_seed
       if p.is_decoder:
         params.is_masked = True
       else:
@@ -409,7 +387,6 @@ class TransformerLayer(base_layer.LayerBase):
         params.name = 'multihead_atten'
         params.source_dim = p.source_dim
         params.packed_input = p.packed_input
-        params.random_seed = p.random_seed
         self.CreateChild('atten', params)
 
       # Initialize feed-forward layer
@@ -417,7 +394,6 @@ class TransformerLayer(base_layer.LayerBase):
       params.name = 'tr_fflayer'
       params.input_dim = p.source_dim
       params.output_dim = p.output_dim
-      params.random_seed = p.random_seed
       self.CreateChild('fflayer', params)
 
   def FProp(self,
@@ -448,7 +424,7 @@ class TransformerLayer(base_layer.LayerBase):
     coming from the activations of layer below, in particular `source_vecs`.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       source_vecs: [source_time, source_batch, dim].
       source_paddings: [source_time, source_batch]
@@ -457,9 +433,10 @@ class TransformerLayer(base_layer.LayerBase):
       source_segment_id: [source_time, source_batch]
       aux_segment_id: [aux_time, aux_batch]
     Returns:
-      The attention context vector:     [source_time, source_batch, dim].
-      The attention probability vector: [source_time, source_batch, source_time]
-        if is_decoder is False, otherwise [source_time, source_batch, aux_time].
+      The attention context vector, [source_time, source_batch, dim].
+
+      The attention probability vector, [source_time, source_batch, source_time]
+      if is_decoder is False, otherwise [source_time, source_batch, aux_time].
     """
     p = self.params
     if p.packed_input:
@@ -496,7 +473,7 @@ class TransformerLayer(base_layer.LayerBase):
     models.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       source_vecs: [source_batch, dim].
       prefix_states: dict, containing tensors which are the results of previous
@@ -504,8 +481,10 @@ class TransformerLayer(base_layer.LayerBase):
       aux_vecs: [aux_time, aux_batch, dim]
       aux_paddings: [aux_time, aux_batch]
     Returns:
-      The attention context vector:     [target_batch, source_dim]
-      The attention probability vector: [source_time, target_batch]
+      The attention context vector, [target_batch, source_dim]
+
+      The attention probability vector, [source_time, target_batch]
+
       Updated prefix states
     """
     p = self.params
@@ -532,11 +511,12 @@ class TransformerLayer(base_layer.LayerBase):
     return h, atten_prob, new_states
 
 
-class MergerLayer(base_layer.LayerBase):
+class MergerLayer(base_layer.BaseLayer):
   """Merges a list of input tensors with various options into a single tensor.
 
   Implements a merger/combiner operator given a list of tensors. The merger
   operator outputs a single tensor with the following options (merger_op):
+
   - atten: Applies attention over the set of input tensors given query vector.
   - mean: Takes the mean of input tensors.
   - concat: Concatenates the input tensors over the last dimension.
@@ -622,7 +602,7 @@ class MergerLayer(base_layer.LayerBase):
     """Combines the list of input tensors into a single tensor.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       inputs: A list of tensors of shape [..., hidden_dim] or
           [..., [pre_proj_input_dims[i]]] if pre_proj_input_dims is specified.
@@ -651,7 +631,7 @@ class MergerLayer(base_layer.LayerBase):
     if p.merger_op == 'mean':
       # Simply take the mean, all dims must match.
       with tf.control_dependencies([
-          assert_shape_match(tf.shape(t1), tf.shape(t2))
+          py_utils.assert_shape_match(tf.shape(t1), tf.shape(t2))
           for t1, t2 in tensor_pairs
       ]):
         output = tf.add_n(inputs) / n_sources
@@ -659,7 +639,7 @@ class MergerLayer(base_layer.LayerBase):
     elif p.merger_op == 'sum':
       # Sum up all sources, all dims must match.
       with tf.control_dependencies([
-          assert_shape_match(tf.shape(t1), tf.shape(t2))
+          py_utils.assert_shape_match(tf.shape(t1), tf.shape(t2))
           for t1, t2 in tensor_pairs
       ]):
         output = tf.add_n(inputs)
@@ -671,7 +651,7 @@ class MergerLayer(base_layer.LayerBase):
       inputs = py_utils.HasRank(inputs, 4)
 
       with tf.control_dependencies([
-          assert_shape_match(tf.shape(t1), tf.shape(t2))
+          py_utils.assert_shape_match(tf.shape(t1), tf.shape(t2))
           for t1, t2 in tensor_pairs
       ]):
         w = tf.expand_dims(
@@ -687,7 +667,7 @@ class MergerLayer(base_layer.LayerBase):
     elif p.merger_op == 'atten':
       # Apply attention over the concatenated tensor, all dims must match.
       with tf.control_dependencies([
-          assert_shape_match(tf.shape(t1), tf.shape(t2))
+          py_utils.assert_shape_match(tf.shape(t1), tf.shape(t2))
           for t1, t2 in tensor_pairs
       ]):
         inputs = tf.stack(inputs, axis=0)
@@ -700,8 +680,8 @@ class MergerLayer(base_layer.LayerBase):
     elif p.merger_op == 'concat':
       # Concatenate over the last dim, all dims but last must match.
       with tf.control_dependencies([
-          assert_equal(tf.shape(t1)[:-1],
-                       tf.shape(t2)[:-1]) for t1, t2 in tensor_pairs
+          py_utils.assert_equal(tf.shape(t1)[:-1],
+                                tf.shape(t2)[:-1]) for t1, t2 in tensor_pairs
       ]):
         output = tf.concat(inputs, axis=-1)
 
@@ -711,7 +691,7 @@ class MergerLayer(base_layer.LayerBase):
     return output
 
 
-class StyleLayer(base_layer.LayerBase):
+class StyleLayer(base_layer.BaseLayer):
   """A layer that performs weighted style emb lookup."""
 
   @classmethod
@@ -725,8 +705,6 @@ class StyleLayer(base_layer.LayerBase):
         'enable_ctx_post_proj', True,
         'If True, computed context is post projected into'
         ' ctx_post_proj_dim.')
-    p.Define('random_seed', None,
-             'If not None, the random seed used in various ops.')
     return p
 
   @base_layer.initializer
@@ -757,8 +735,7 @@ class StyleLayer(base_layer.LayerBase):
           ctx_post_proj_dim=p.output_dim,
           num_attention_heads=p.num_heads,
           use_source_vec_as_attention_value=False,
-          enable_ctx_post_proj=p.enable_ctx_post_proj,
-          random_seed=p.random_seed)
+          enable_ctx_post_proj=p.enable_ctx_post_proj)
       self.CreateChild('atten', atten_p)
 
   def EmbLookup(self, theta, ids):
@@ -769,8 +746,8 @@ class StyleLayer(base_layer.LayerBase):
       ids: A rank-N int32 tensor.
 
     Returns:
-      embs: A rank-(N+1) params.dtype tensor. embs[indices, :] is the
-        embedding vector for ids[indices].
+      embs, A rank-(N+1) params.dtype tensor.
+      embs[indices, :] is the embedding vector for ids[indices].
     """
     p = self.params
     # TODO(ngyuzh): call this function for virsualize big discrete table,
@@ -787,7 +764,7 @@ class StyleLayer(base_layer.LayerBase):
       inp: attention probabilities of shape [batch_size, num_styles].
 
     Returns:
-      style_emb: weighted combined style embedding based on inp.
+      style_emb - weighted combined style embedding based on inp.
     """
     p = self.params
     b_size = tf.shape(inp)[0]
@@ -795,11 +772,10 @@ class StyleLayer(base_layer.LayerBase):
     styles_paddings = tf.zeros([p.num_styles, b_size])
     atten_probs = tf.tile(tf.expand_dims(inp, 1), [1, p.num_heads, 1])
     atten_probs = tf.reshape(atten_probs, [-1, p.num_styles])
-    _, packed_context, _, _ = (
-        self.atten.InitForSourcePacked(theta.atten, styles_w, styles_w,
-                                       styles_paddings))
+    packed_src = self.atten.InitForSourcePacked(theta.atten, styles_w, styles_w,
+                                                styles_paddings)
     style_emb, _ = self.atten.ComputeContextVectorWithAttenProbs(
-        theta.atten, packed_context, atten_probs)
+        theta.atten, packed_src.source_contexts, atten_probs)
     return style_emb
 
   def FProp(self, theta, inp):
@@ -809,11 +785,9 @@ class StyleLayer(base_layer.LayerBase):
     b_size = tf.shape(inp)[0]
     styles_w = tf.tile(tf.nn.tanh(theta.styles_w), [1, b_size, 1])
     styles_paddings = tf.zeros([p.num_styles, b_size])
-    packed_vec, packed_context, packed_padding, packed_seg_id = (
-        self.atten.InitForSourcePacked(theta.atten, styles_w, styles_w,
-                                       styles_paddings))
+    packed_src = self.atten.InitForSourcePacked(theta.atten, styles_w, styles_w,
+                                                styles_paddings)
     style_emb, probs, _ = self.atten.ComputeContextVectorWithSource(
-        theta.atten, packed_vec, packed_context, packed_padding, packed_seg_id,
-        inp)
+        theta.atten, packed_src, inp)
     # TODO(yonghui): Extract and return the attention probabilities.
     return style_emb, probs

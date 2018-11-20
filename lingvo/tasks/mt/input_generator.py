@@ -32,8 +32,15 @@ class NmtInput(base_input_generator.BaseSequenceInputGenerator):
 
   @classmethod
   def Params(cls):
-    """Defaults params for NmtInput."""
+    """Defaults params for `NmtInput`."""
     p = super(NmtInput, cls).Params()
+    p.Define(
+        'natural_order_model', True,
+        'Whether the model consuming the input is a natural order model. Input '
+        'is generated in natural order if True. Input is generated in reversed '
+        'order if False. The value should be consistent with the underlying '
+        'model. Set to True if training or using a natural order model, '
+        'otherwise set to False.')
     p.tokenizer = tokenizers.VocabFileTokenizer.Params()
     p.source_max_length = 300
     return p
@@ -70,6 +77,8 @@ class NmtInput(base_input_generator.BaseSequenceInputGenerator):
   def __init__(self, params):
     super(NmtInput, self).__init__(params)
     p = self.params
+
+    self.natural_order_model = p.natural_order_model
 
     (self._src_ids, self._src_paddings, self._tgt_ids, self._tgt_paddings,
      self._tgt_labels, self._tgt_weights) = self._BuildDataSource()

@@ -12,15 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+# pylint: disable=line-too-long
 """Trainer.
 
 To run locally:
-$ bazel build -c opt lingvo:trainer
-$ bazel-bin/lingvo/trainer --logtostderr --model=image.mnist.LeNet5 --mode=sync
---logdir=/tmp/lenet5 --run_locally=cpu
 
-To use GPU, add --config=cuda to build command and set --run_locally=gpu.
+.. code-block:: bash
+
+  $ bazel build -c opt //lingvo:trainer
+  $ bazel-bin/lingvo/trainer --logtostderr \
+      --model=image.mnist.LeNet5 --mode=sync --logdir=/tmp/lenet5 --run_locally=cpu
+
+To use GPU, add `--config=cuda` to build command and set `--run_locally=gpu`.
 """
+# pylint: enable=line-too-long
 
 from __future__ import absolute_import
 from __future__ import division
@@ -34,11 +39,13 @@ import time
 
 import numpy as np
 import six
+from six.moves import zip
 import tensorflow as tf
 
 from lingvo import base_runner
 from tensorflow.core.protobuf import config_pb2
 from lingvo import base_trial
+from lingvo import model_registry
 from lingvo.core import base_model
 from lingvo.core import base_model_params
 from lingvo.core import cluster_factory
@@ -84,6 +91,8 @@ tf.flags.DEFINE_integer('controller_gpus', 0, 'Number of controller GPUs.')
 tf.flags.DEFINE_string('worker_job', '/job:trainer', 'Job name.')
 tf.flags.DEFINE_integer('worker_replicas', 1, 'Number of replicas.')
 tf.flags.DEFINE_integer('worker_gpus', 0, 'Number of gpus to use per replica.')
+tf.flags.DEFINE_integer('worker_tpus', 0, 'Number of tpus to use per replica.')
+tf.flags.DEFINE_integer('worker_num_tpu_hosts', 0, 'Number of tpu hosts.')
 tf.flags.DEFINE_integer('worker_split_size', 1,
                         'Number of devices for one split.')
 
@@ -176,7 +185,7 @@ class Controller(base_runner.BaseRunner):
         self._model.ConstructFPropBPropGraph()
         self._saver = self._GetSaver()
         self._summary_op = tf.summary.merge_all()
-        self._vars = tf.get_collection(tf.GraphKeys.VARIABLES)
+        self._vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
         self._uninitialized = tf.report_uninitialized_variables(self._vars)
         self._initialize_all = tf.global_variables_initializer()
         self.initialize_tables = tf.tables_initializer()
@@ -185,7 +194,7 @@ class Controller(base_runner.BaseRunner):
 
     self._ExportMetrics(params=self.params)
     self._model_analysis, self._total_num_params = _ModelAnalysis(self._model)
-    tf.logging.error(self._model_analysis)
+    tf.logging.info(self._model_analysis)
     self._WriteToLog(self._model_analysis, self._control_dir,
                      'model_analysis.txt')
     self._WriteToLog(self.params.ToText(), self._control_dir, 'params.txt')
@@ -470,22 +479,172 @@ class Trainer(base_runner.BaseRunner):
         # pctx.trace_next_step()
         # pctx.dump_next_step()
 
-        _, global_step, eval_metrics = sess.run([
+        _, global_step, eval_metrics, fetched_verbose_tensors = sess.run([
             model_task.train_op,
             self._model.global_step,
             model_task.eval_metrics,
+            model_task.trainer_verbose_tensors,
         ])
         # pctx.profiler.profile_operations(options=opts)
         msg = 'step:%6d' % (global_step)
         for key, (val, _) in sorted(six.iteritems(eval_metrics)):
           msg += ' %s:%.8g' % (key, val)
           self._SummarizeValue(global_step, key, val, self._summary_writer)
+        model_task.ProcessFetchedTrainerVerboseTensors(global_step,
+                                                       fetched_verbose_tensors)
         if global_step >= next_status_step:
           self._SetStatusMessage(msg)
           next_status_step = global_step + status_interval_steps
         else:
           tf.logging.info(msg)
         self._model.ModelPostUpdate(sess, global_step, eval_metrics)
+
+
+class TrainerTpu(base_runner.BaseRunner):
+  """Trainer on TPU."""
+
+  def __init__(self, *args, **kwargs):
+    super(TrainerTpu, self).__init__(*args, **kwargs)
+
+    # Multiple TPU trainer tasks not tested/implemented.
+    assert self._cluster.num_replicas == 1
+    data_parallelism = self._cluster.num_splits_per_client
+    assert data_parallelism
+    num_devices_per_split = self._cluster.num_devices_per_split
+    tf.logging.info('data_parallelism: %d, num_devices_per_split: %d',
+                    data_parallelism, num_devices_per_split)
+
+    def ComputationShape(split_size):
+      """Decides the computation shape based on the split_size."""
+      computation_shape = None
+      if split_size == 1:
+        computation_shape = [1, 1, 1]
+      elif split_size == 2:
+        computation_shape = [1, 1, 2]
+      elif split_size == 4:
+        computation_shape = [1, 2, 2]
+      elif split_size == 8:
+        computation_shape = [2, 2, 2]
+      elif split_size == 16:
+        computation_shape = [4, 2, 2]
+      else:
+        assert False, ('Model parallelism with %d devices is currently not'
+                       ' supported.' % split_size)
+      assert computation_shape is not None
+      return computation_shape
+
+    self._steps_per_loop = min(self.params.train.tpu_steps_per_loop,
+                               self.params.train.max_steps)
+
+    tf.logging.info(
+        'Creating TrainerTpu using data parallelism %s '
+        'and %s steps_per_loop', data_parallelism, self._steps_per_loop)
+
+    @py_utils.RetryOnTransientTfError()
+    def _WaitTillInit():
+      """Wait until the model is ready."""
+      try:
+        with self._GetSession() as sess:
+          topology = sess.run(
+              tf.contrib.tpu.initialize_system(embedding_config=None, job=None))
+          device_assignment = tf.contrib.tpu.device_assignment(
+              topology,
+              computation_shape=ComputationShape(num_devices_per_split),
+              num_replicas=data_parallelism)
+          py_utils.SetTpuDeviceAssignment(device_assignment)
+          tf.logging.info('device_assignment.core_assignment: %s',
+                          str(device_assignment.core_assignment))
+          tf.logging.info('device_assignment.topology.device_coordinates: %s',
+                          str(device_assignment.topology.device_coordinates))
+      except py_utils.transient_tf_errors as e:
+        tf.logging.info('TPU initialization failed: %s', e)
+        raise
+
+    _WaitTillInit()
+
+    with self._graph.as_default(), tf.container(self._container_id):
+      with self._cluster, tf.device(self._cluster.job_spec.name):
+        self._eval_metrics = metrics.TpuEvalMetrics()
+
+        def TpuTrainStep(*args):
+          self._model = self.params.cls(self.params)
+          self._model.ConstructFPropBPropGraph()
+          per_step_eval_metrics = self._eval_metrics.SetMetrics(
+              self._model.GetTask().eval_metrics, args)
+          summed_metrics = []
+          assert len(per_step_eval_metrics) == len(args)
+          for x, y in zip(per_step_eval_metrics, args):
+            summed_metrics.append(x + y)
+          return summed_metrics + [self._model.GetTask().train_op]
+
+        def TpuTrain():
+          loop_result = tf.contrib.tpu.repeat(
+              self._steps_per_loop,
+              TpuTrainStep,
+              inputs=self._eval_metrics.initial_values,
+              name='train_loop')
+          # Final metrics are the avg across self._steps_per_loop steps.
+          return self._eval_metrics.FinalizeMetrics(loop_result)
+
+        batch_parallel_res = tf.contrib.tpu.batch_parallel(
+            TpuTrain,
+            num_shards=data_parallelism,
+            device_assignment=py_utils.GetTpuDeviceAssignment())
+        # Get metric result from a single replica; they are all same here.
+        self._tpu_train_ops = [t[0] for t in batch_parallel_res]
+
+      self.initialize_tables = tf.tables_initializer()
+      self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
+      assert not tf.get_collection(py_utils.CLOSE_QUEUE_OPS)
+      tf.logging.info('Trainer number of enqueue ops: %d',
+                      len(self.enqueue_ops))
+
+    self._summary_writer = self._CreateSummaryWriter(self._train_dir)
+
+    # Saves the graph def.
+    tf.train.write_graph(self._graph.as_graph_def(), self._train_dir,
+                         'train.pbtxt')
+
+  def Start(self):
+    # Run training.
+    self._RunLoop('trainer', self._Loop)
+
+  def StartEnqueueOp(self, op):
+    self._RunLoop('trainer/enqueue_op/%s' % op.name, self._LoopEnqueue, op)
+
+  def _SummarizeValue(self, steps, tag, value):
+    self._summary_writer.add_summary(
+        metrics.CreateScalarSummary(tag, value), steps)
+
+  def _Loop(self):
+    with tf.container(self._container_id), self._GetSession() as sess:
+      sess.run(self.initialize_tables)
+      sess.run(
+          tf.contrib.tpu.initialize_system(embedding_config=None, job=None))
+      if FLAGS.run_locally == 'tpu':
+        sess.run(tf.global_variables_initializer())
+      global_step, = sess.run([self._model.global_step])
+      eval_metrics = None
+
+      while True:
+        if (self._trial.ShouldStopAndMaybeReport(global_step, eval_metrics) or
+            self._ShouldStop(sess, global_step)):
+          tf.logging.info('Training finished.')
+          return
+
+        values = sess.run(self._tpu_train_ops)
+        eval_metrics = self._eval_metrics.PackMetricsValues(values)
+
+        # Note: global_step is incremented by self._steps_per_loop by the
+        # previous sess.run call.
+        global_step, = sess.run([self._model.global_step])
+
+        msg = 'step:%6d' % (global_step)
+        for key, (val, _) in sorted(six.iteritems(eval_metrics)):
+          msg += ' %s:%.8g' % (key, val)
+          self._SummarizeValue(global_step, key, val)
+
+        self._SetStatusMessage(msg)
 
 
 class Evaler(base_runner.BaseRunner):
@@ -536,10 +695,11 @@ class Evaler(base_runner.BaseRunner):
         if not path or self._EvalOnce(path, sess):
           break
 
-    self.EvalLatestCheckpoint()
+    self.EvalLatestCheckpoint(path)
+    self._trial.ReportDone()
     tf.logging.info('Evaluation finished.')
 
-  def EvalLatestCheckpoint(self):
+  def EvalLatestCheckpoint(self, last_path=None):
     """Runs eval once on the latest checkpoint."""
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
@@ -547,6 +707,9 @@ class Evaler(base_runner.BaseRunner):
       path = tf.train.latest_checkpoint(self._train_dir)
       if not path:
         tf.logging.info('No checkpoint available.')
+        return
+      elif path == last_path:
+        tf.logging.info('Latest checkpoint was already evaluated.')
         return
       self._EvalOnce(path, sess)
 
@@ -611,11 +774,11 @@ class Evaler(base_runner.BaseRunner):
         self._summary_writer,
         os.path.basename(self._eval_dir),
         global_step, {k: v.Summary(k) for k, v in six.iteritems(metrics_dict)},
-        text_filename=os.path.join(self._eval_dir, 'score.txt'))
+        text_filename=os.path.join(self._eval_dir,
+                                   'score-{:08d}.txt'.format(global_step)))
 
     is_final = global_step >= self.params.train.max_steps
-    should_stop = self._trial.ReportEvalMeasure(global_step, is_final,
-                                                metrics_dict)
+    should_stop = self._trial.ReportEvalMeasure(global_step, metrics_dict, path)
     return should_stop or is_final
 
 
@@ -636,6 +799,7 @@ def _GetCheckpointIdForDecodeOut(checkpoint_path, global_step):
   Args:
    checkpoint_path: path to checkpoint file.
    global_step: int specifying the global step of the model.
+
   Returns:
    Checkpoint id as int.
   """
@@ -673,7 +837,9 @@ class Decoder(base_runner.BaseRunner):
         # tasks, which may result in different node names being chosen.
         # Obviously, variable names has to be stay the same between train and
         # decode.
-        self._dec_output = self._model_task.Decode()
+        input_batch = (
+            self._model_task.input_generator.GetPreprocessedInputBatch())
+        self._dec_output = self._model_task.Decode(input_batch)
         self._saver = self._GetSaver()
         self._summary_op = tf.summary.merge_all()
       self.initialize_tables = tf.tables_initializer()
@@ -710,7 +876,7 @@ class Decoder(base_runner.BaseRunner):
     return os.path.join(out_dir, 'decoder_out_%09d' % checkpoint_id)
 
   def DecodeCheckpoint(self, sess, checkpoint_path):
-    """Decodes samples_per_summary examples using params in checkpoint_path."""
+    """Decodes `samples_per_summary` examples using `checkpoint_path`."""
     p = self._model_task.params
     samples_per_summary = p.eval.decoder_samples_per_summary
     if not samples_per_summary:
@@ -725,13 +891,13 @@ class Decoder(base_runner.BaseRunner):
     while num_examples_metric.total_value < samples_per_summary:
       tf.logging.info('Fetching dec_output.')
       run_options = config_pb2.RunOptions(
-          report_tensor_allocations_upon_oom=True)
+          report_tensor_allocations_upon_oom=False)
       if self._summary_op is None:
         # No summaries were collected.
         dec_out = sess.run(self._dec_output, options=run_options)
       else:
-        dec_out, summary = sess.run(
-            [self._dec_output, self._summary_op], options=run_options)
+        dec_out, summary = sess.run([self._dec_output, self._summary_op],
+                                    options=run_options)
         self._summary_writer.add_summary(summary, global_step)
       tf.logging.info('Done fetching.')
       decode_out = self._model_task.PostProcessDecodeOut(dec_out, dec_metrics)
@@ -750,7 +916,8 @@ class Decoder(base_runner.BaseRunner):
         os.path.basename(self._decoder_dir),
         global_step,
         summaries,
-        text_filename=os.path.join(self._decoder_dir, 'score.txt'))
+        text_filename=os.path.join(self._decoder_dir,
+                                   'score-{:08d}.txt'.format(global_step)))
     self._ExportMetrics(
         decode_checkpoint=global_step,
         dec_metrics=dec_metrics,
@@ -771,39 +938,61 @@ class RunnerManager(object):
 
   # This is a hack so these classes can be overridded with internal
   # non-public implementations.
+  model_registry = model_registry
   Controller = Controller
   Trainer = Trainer
+  TrainerTpu = TrainerTpu
   Evaler = Evaler
   Decoder = Decoder
 
-  @classmethod
-  def LaunchTensorFlow(cls):
+  def __init__(self, model):
+    self._model_name = model
+
+  def MaybeLaunchTensorFlow(self):
     """Starts TF machinary in this process."""
+    if FLAGS.run_locally:
+      return
+
     tf.logging.info('Launching tensorflow.')
 
     target = FLAGS.tf_master
     if not target.startswith('localhost'):
-      # E.g., train_client is configured w/ FLAGS.tf_master pointing to
+      # E.g., trainer_client is configured w/ FLAGS.tf_master pointing to
       # another job. In that case, start a local server.
-      target = tf.train.Server.create_local_server().target
+      job_specs = FLAGS.cluster_spec.split('@')
+      cluster_spec_dict = {}
+      for job_spec in job_specs:
+        # ps_host=worker1:1231,worker2:1234
+        job_machines = job_spec.split('=')
+        if len(job_machines) != 2:
+          raise ValueError('Invalid job specification: %s', job_spec)
+        cluster_spec_dict[job_machines[0]] = job_machines[1].split(',')
+      self._tf_server = tf.train.Server(
+          tf.train.ClusterSpec(cluster_spec_dict),
+          job_name=FLAGS.job,
+          task_index=FLAGS.task)
+      target = self._tf_server.target
+    if not FLAGS.tf_master:
+      FLAGS.tf_master = target
     with tf.Session(target).as_default():
       value = (tf.constant(1.) + tf.constant(1.)).eval()
     assert value == 2.0, 'Something is really wrong.'
     tf.logging.info('Launched tensorflow.')
 
-  @classmethod
-  def GetParamsForDataset(cls, model_name, job_name, dataset_name):
-    """Returns params for `model_name` on the dataset `dataset_name`."""
+  def GetParamsForDataset(self, job_name, dataset_name):
+    """Returns params for job `job_name` on the dataset `dataset_name`."""
     try:
-      cfg = base_runner.GetParams(model_name, dataset_name)
-    except AttributeError:
-      cfg = base_runner.GetParams(model_name, dataset_name.title())
-    cls.UpdateClusterParamsFromFlags(cfg, job_name)
+      cfg = self.model_registry.GetParams(self._model_name, dataset_name)
+    except AttributeError as e:
+      dataset_name_retry = dataset_name.title()
+      tf.logging.warning('Exception configuring dataset %s, retrying as %s: %s',
+                         dataset_name, dataset_name_retry, e)
+      cfg = self.model_registry.GetParams(self._model_name, dataset_name_retry)
+    self.UpdateClusterParamsFromFlags(cfg, job_name)
     return cfg
 
-  @classmethod
-  def MaybeConfigRunDistributed(cls):
-    """If given a FLAGS.cluster_spec, create a server and update flags."""
+  def MaybeConfigRunDistributed(self):
+    """If given a `FLAGS.cluster_spec`, update flags for running distributed."""
     if not FLAGS.cluster_spec:
       return
     job_specs = FLAGS.cluster_spec.split('@')
@@ -814,38 +1003,33 @@ class RunnerManager(object):
       if len(job_machines) != 2:
         raise ValueError('Invalid job specification: %s', job_spec)
       cluster_spec_dict[job_machines[0]] = job_machines[1].split(',')
-    start_server = True
-    for role in sorted(cluster_spec_dict.keys()):
-      if role.startswith('decoder_'):
+    if FLAGS.job == 'trainer_client':
+      FLAGS.tf_master = 'grpc://%s' % cluster_spec_dict['worker'][FLAGS.task]
+    for job in cluster_spec_dict.keys():
+      if job.startswith('decoder_'):
         assert len(job_specs) == 1, 'Decoder jobs must run on their own'
         assert ',' not in job_specs[0], 'Only single machine supported'
-        FLAGS.decoder_job = '/job:localhost'
+        FLAGS.decoder_job = '/job:%s' % job
         FLAGS.decoder_replicas = 1
-        start_server = False
-      elif role.startswith('evaler_'):
+      if job.startswith('evaler_'):
         assert len(job_specs) == 1, 'Evaler jobs must run on their own'
         assert ',' not in job_specs[0], 'Only single machine supported'
-        FLAGS.evaler_job = '/job:localhost'
+        FLAGS.evaler_job = '/job:%s' % job
         FLAGS.evaler_replicas = 1
-        start_server = False
-      elif role == 'worker':
-        assert FLAGS.mode == 'sync', (
-            '\'worker\' jobs should only be in sync mode')
+      if FLAGS.mode == 'sync' and FLAGS.job in ('controller', 'trainer_client',
+                                                'worker'):
         FLAGS.worker_job = '/job:worker'
         FLAGS.worker_replicas = len(cluster_spec_dict['worker'])
         FLAGS.ps_job = '/job:worker'
         FLAGS.ps_replicas = FLAGS.worker_replicas
-    if start_server:
-      cluster = tf.train.ClusterSpec(cluster_spec_dict)
-      server = tf.train.Server(
-          cluster, job_name=FLAGS.job, task_index=FLAGS.task)
-      FLAGS.tf_master = server.target
-      # TODO(drpng): properly join all processes.
-      cls._server = server
+      if FLAGS.mode == 'async' and FLAGS.job in ('controller', 'trainer', 'ps'):
+        FLAGS.worker_job = '/job:trainer'
+        FLAGS.worker_replicas = len(cluster_spec_dict['trainer'])
+        FLAGS.ps_job = '/job:ps'
+        FLAGS.ps_replicas = len(cluster_spec_dict['ps'])
 
-  @classmethod
-  def UpdateClusterParamsFromFlags(cls, cfg, job_name):
-    """Update Params with a training cluster configuration from flags."""
+  def UpdateClusterParamsFromFlags(self, cfg, job_name):
+    """Update `cfg` with a training cluster configuration from flags."""
     cfg.cluster.mode = FLAGS.mode
     cfg.cluster.job = job_name
     cfg.cluster.task = FLAGS.task
@@ -856,6 +1040,8 @@ class RunnerManager(object):
     cfg.cluster.worker.name = FLAGS.worker_job
     cfg.cluster.worker.replicas = FLAGS.worker_replicas
     cfg.cluster.worker.gpus_per_replica = FLAGS.worker_gpus
+    cfg.cluster.worker.tpus_per_replica = FLAGS.worker_tpus
+    cfg.cluster.worker.num_tpu_hosts = FLAGS.worker_num_tpu_hosts
     cfg.cluster.worker.devices_per_split = FLAGS.worker_split_size
 
     cfg.cluster.ps.name = FLAGS.ps_job
@@ -873,9 +1059,7 @@ class RunnerManager(object):
     cfg.cluster.decoder.replicas = FLAGS.decoder_replicas
     cfg.cluster.decoder.gpus_per_replica = FLAGS.decoder_gpus
 
-  @classmethod
-  def _CreateRunner(cls, job, model_name, model_task_name, logdir, tf_master,
-                    trial):
+  def _CreateRunner(self, job, model_task_name, logdir, tf_master, trial):
     """Create a runner."""
     evaler_job_name_prefix = 'evaler_'
     decoder_job_name_prefix = 'decoder_'
@@ -883,46 +1067,41 @@ class RunnerManager(object):
     tf.logging.info('Job %s start', job)
     common_args = (model_task_name, logdir, tf_master, trial)
     if job == 'controller':
-      cfg = cls.GetParamsForDataset(model_name, 'controller', 'Train')
-      return cls.Controller(cfg, *common_args)
+      cfg = self.GetParamsForDataset('controller', 'Train')
+      return self.Controller(cfg, *common_args)
     elif job == 'trainer':
-      cfg = cls.GetParamsForDataset(model_name, 'trainer', 'Train')
-      return cls.Trainer(cfg, *common_args)
+      cfg = self.GetParamsForDataset('trainer', 'Train')
+      return self.Trainer(cfg, *common_args)
     elif job == 'trainer_client':
-      cfg = cls.GetParamsForDataset(model_name, 'trainer_client', 'Train')
+      cfg = self.GetParamsForDataset('trainer_client', 'Train')
       if py_utils.use_tpu():
-        raise ValueError('TPU training is not supported.')
+        return self.TrainerTpu(cfg, *common_args)
       else:
-        return cls.Trainer(cfg, *common_args)
+        return self.Trainer(cfg, *common_args)
     elif job.startswith(evaler_job_name_prefix):
       dataset_name = job[len(evaler_job_name_prefix):]
-      cfg = cls.GetParamsForDataset(model_name, 'evaler', dataset_name)
-      return cls.Evaler(dataset_name.lower(), cfg, *common_args)
+      cfg = self.GetParamsForDataset('evaler', dataset_name)
+      return self.Evaler(dataset_name.lower(), cfg, *common_args)
     elif job.startswith(decoder_job_name_prefix):
       dataset_name = job[len(decoder_job_name_prefix):]
-      cfg = cls.GetParamsForDataset(model_name, 'decoder', dataset_name)
-      return cls.Decoder(dataset_name.lower(), cfg, *common_args)
-    # TODO(drpng): make a tf_server.
-    elif job == 'ps' or 'worker' or 'input':
-      if cls._server:
-        cls._server.join()
+      cfg = self.GetParamsForDataset('decoder', dataset_name)
+      return self.Decoder(dataset_name.lower(), cfg, *common_args)
+    elif job in ('ps', 'worker', 'input'):
+      self._tf_server.join()
     else:
       raise ValueError('job %s is not supported' % job)
 
-  @classmethod
-  def CreateRunners(cls, jobs, model_name, logdir,
-                    trial=base_trial.NoOpTrial()):
-    """Creates a list of runners based on FLAGS.mode.
+  def CreateRunners(self, jobs, logdir, trial=base_trial.NoOpTrial()):
+    """Creates a list of runners based on `FLAGS.mode`.
 
     Args:
       jobs: a list of runner jobs.
-      model_name: name of a registered ModelParams class.
       logdir: the directory used for logging, usually on CNS.
-      trial: optional Trial object, used for reporting measures and early
-          stopping.
+      trial: optional `Trial` object, used for reporting measures and early
+        stopping.
 
     Returns:
-      A list of BaseRunners, one per job in 'jobs'.
+      A list of `.BaseRunner`, one per job in `jobs`.
     """
 
     runners = []
@@ -934,17 +1113,18 @@ class RunnerManager(object):
           (j.startswith('decoder') or j.startswith('evaler'))):
         tf_master = ''
 
-      runner = cls._CreateRunner(j, model_name, FLAGS.model_task_name, logdir,
-                                 tf_master, trial)
+      runner = self._CreateRunner(j, FLAGS.model_task_name, logdir, tf_master,
+                                  trial)
       runners.append(runner)
     return runners
 
-  @classmethod
-  def StartRunners(cls, runners):
-    """Runs 'runners' in parallel threads. Returns when all of them finish.
+  def StartRunners(self, runners):
+    """Runs `runners` in parallel threads.
+
+    Returns when all of them finish.
 
     Args:
-      runners: a list of BaseRunners.
+      runners: a list of `.BaseRunner`.
 
     Returns:
       None.
@@ -975,36 +1155,30 @@ class RunnerManager(object):
           break
     tf.logging.info('All runners done.')
 
-  @classmethod
-  def RunTrial(cls, job, model_name, logdir, trial):
+  def RunTrial(self, job, logdir, trial):
     """A wrapper function for running a trial."""
     if job == 'all':
       # For async mode: Run controller, trainer, evaler jobs in one process,
       # multiple threads.
-      cls.StartRunners(
-          cls.CreateRunners(['controller', 'trainer'], model_name, logdir,
-                            trial))
-      evaler = cls._CreateRunner('evaler_dev', model_name,
-                                 FLAGS.model_task_name, logdir, FLAGS.tf_master,
-                                 trial)
+      self.StartRunners(
+          self.CreateRunners(['controller', 'trainer'], logdir, trial))
+      evaler = self._CreateRunner('evaler_dev', FLAGS.model_task_name, logdir,
+                                  FLAGS.tf_master, trial)
       evaler.EvalLatestCheckpoint()
     elif job == 'all_sync':
       # For sync mode: Run controller, trainer_client, evaler jobs in one
       # process, multiple threads.
-      cls.StartRunners(
-          cls.CreateRunners(['controller', 'trainer_client'], model_name,
-                            logdir, trial))
-      evaler = cls._CreateRunner('evaler_dev', model_name,
-                                 FLAGS.model_task_name, logdir, FLAGS.tf_master,
-                                 trial)
+      self.StartRunners(
+          self.CreateRunners(['controller', 'trainer_client'], logdir, trial))
+      evaler = self._CreateRunner('evaler_dev', FLAGS.model_task_name, logdir,
+                                  FLAGS.tf_master, trial)
       evaler.EvalLatestCheckpoint()
     else:
       # Run each job in separate process/task
       # TODO(rpang): add support for running evaler_test and decoder.
-      cls.StartRunners(cls.CreateRunners([job], model_name, logdir, trial))
+      self.StartRunners(self.CreateRunners([job], logdir, trial))
 
-  @classmethod
-  def MaybeConfigRunLocally(cls):
+  def MaybeConfigRunLocally(self):
     """Update flags if configured to run locally."""
     if not FLAGS.run_locally:
       # Do nothing
@@ -1017,7 +1191,10 @@ class RunnerManager(object):
       FLAGS.mode = 'sync'
 
     if not FLAGS.job:
-      FLAGS.job = 'controller,trainer_client'
+      if FLAGS.run_locally == 'tpu':
+        FLAGS.job = 'trainer_client'
+      else:
+        FLAGS.job = 'controller,trainer_client'
 
     FLAGS.task = 0
 
@@ -1030,6 +1207,11 @@ class RunnerManager(object):
         FLAGS.worker_gpus = 1
     else:
       FLAGS.worker_gpus = 0
+    if FLAGS.run_locally == 'tpu':
+      FLAGS.xla_device = 'tpu'
+      FLAGS.enable_asserts = False
+    else:
+      FLAGS.worker_tpus = 0
 
     if not FLAGS.worker_split_size:
       FLAGS.worker_split_size = 1
@@ -1055,85 +1237,80 @@ class RunnerManager(object):
     # else:
     #   FLAGS.decoder_gpus = 0
 
+  def InspectModel(self):
+    """Prints out model analysis for the model."""
+    p = self.GetParamsForDataset('controller', 'Train')
+    p.cluster.mode = 'sync'
+    c = cluster_factory.Cluster(p.cluster)
+    with tf.Graph().as_default(), c, tf.device(c.GetPlacer()):
+      analysis, _ = _ModelAnalysis(p.cls(p))
+    print(analysis)
 
-def InspectModel():
-  """Prints out model analysis for the model."""
-  p = RunnerManager.GetParamsForDataset(FLAGS.model, 'controller', 'Train')
-  p.cluster.mode = 'sync'
-  c = cluster_factory.Cluster(p.cluster)
-  with tf.Graph().as_default(), c, tf.device(c.GetPlacer()):
-    analysis, _ = _ModelAnalysis(p.cls(p))
-  print(analysis)
+  def InspectDatasets(self):
+    """Prints out datasets configured for the model."""
+    cls = self.model_registry.GetClass(self._model_name)
+    datasets = []
+    for name, _ in inspect.getmembers(cls, inspect.ismethod):
+      if name not in ['GetDatasetParams', 'Model', 'Task'
+                     ] and not name.startswith('_'):
+        datasets += [name]
+    print(','.join([_.lower() for _ in datasets]))
 
+  def InspectDecoder(self):
+    """Prints out datasets configured for the decoder."""
+    cls = self.model_registry.GetClass(self._model_name)
 
-def InspectDatasets():
-  """Prints out datasets configured for the model."""
-  cls = base_runner.GetClass(FLAGS.model)
-  datasets = []
-  for name, _ in inspect.getmembers(cls, inspect.ismethod):
-    if name not in ['GetDatasetParams', 'Model', 'Task'
-                   ] and not name.startswith('_'):
-      datasets += [name]
-  print(','.join([_.lower() for _ in datasets]))
+    has_decoder = False
+    if issubclass(cls, base_model_params.SingleTaskModelParams):
+      has_decoder = cls.Task(
+      ).cls.CreateDecoderMetrics != base_model.BaseTask.CreateDecoderMetrics
+    else:
+      for _, task_param in cls.Model().task_params.IterParams():
+        has_decoder |= (
+            task_param.cls.CreateDecoderMetrics !=
+            base_model.BaseTask.CreateDecoderMetrics)
+    if has_decoder:
+      # We assume that the proper decoder is implemented.
+      self.InspectDatasets()
+    else:
+      print('')
 
+  def Start(self):
+    """Start the process."""
+    tf.logging.set_verbosity(tf.logging.INFO)
 
-def InspectDecoder():
-  """Prints out datasets configured for the decoder."""
-  cls = base_runner.GetClass(FLAGS.model)
+    assert self.model_registry.GetClass(
+        self._model_name), ('Model %s is not found.' % FLAGS.model)
 
-  has_decoder = False
-  if issubclass(cls, base_model_params.SingleTaskModelParams):
-    has_decoder = cls.Task(
-    ).cls.CreateDecoderMetrics != base_model.BaseTask.CreateDecoderMetrics
-  else:
-    for _, task_param in cls.Model().task_params.IterParams():
-      has_decoder |= (
-          task_param.cls.CreateDecoderMetrics !=
-          base_model.BaseTask.CreateDecoderMetrics)
-  if has_decoder:
-    # We assume that the proper decoder is implemented.
-    InspectDatasets()
-  else:
-    print('')
+    if FLAGS.mode == 'inspect_model':
+      self.InspectModel()
+      return
+
+    if FLAGS.mode == 'inspect_evaler':
+      self.InspectDatasets()
+      return
+
+    if FLAGS.mode == 'inspect_decoder':
+      self.InspectDecoder()
+      return
+
+    assert FLAGS.mode in ['sync', 'async']
+
+    if FLAGS.mode == 'shell':
+      _StartShell(locals())
+      return
+
+    self.MaybeConfigRunLocally()
+    self.MaybeConfigRunDistributed()
+    self.MaybeLaunchTensorFlow()
+    self.StartRunners(self.CreateRunners(FLAGS.job.split(','), FLAGS.logdir))
 
 
 def main(unused_argv):
-  tf.logging.set_verbosity(tf.logging.INFO)
-  RunnerManager.MaybeConfigRunLocally()
-  RunnerManager.MaybeConfigRunDistributed()
-
-  if not (FLAGS.run_locally or FLAGS.mode == 'inspect_evaler' or
-          FLAGS.mode == 'inspect_decoder'):
-    RunnerManager.LaunchTensorFlow()
-
   # pylint: disable=g-import-not-at-top
   # pylint: disable=unused-variable
   from lingvo import model_imports
-
-  if FLAGS.mode == 'shell':
-    _StartShell(locals())
-    return
-
-  assert base_runner.GetClass(
-      FLAGS.model), ('Model %s is not found.' % FLAGS.model)
-
-  if FLAGS.mode == 'inspect_model':
-    InspectModel()
-    return
-
-  if FLAGS.mode == 'inspect_evaler':
-    InspectDatasets()
-    return
-
-  if FLAGS.mode == 'inspect_decoder':
-    InspectDecoder()
-    return
-
-  assert FLAGS.mode in ['sync', 'async']
-
-  RunnerManager.StartRunners(
-      RunnerManager.CreateRunners(
-          FLAGS.job.split(','), FLAGS.model, FLAGS.logdir))
+  RunnerManager(FLAGS.model).Start()
 
 
 if __name__ == '__main__':

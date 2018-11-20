@@ -7,6 +7,34 @@ licenses(["notice"])  # Apache 2.0
 load(
     "//lingvo:lingvo.bzl",
     "lingvo_cuda_py_test",
+    "lingvo_proto_cc",
+    "lingvo_proto_py",
+    "lingvo_py_binary",
+)
+
+py_library(
+    name = "asr_frontend",
+    srcs = ["asr_frontend.py"],
+    deps = [
+        ":base_layer",
+        ":py_utils",
+    ],
+)
+
+py_test(
+    name = "asr_frontend_test",
+    srcs = ["asr_frontend_test.py"],
+    data = [
+        "//lingvo/tools/testdata:audio_data",
+    ],
+    deps = [
+        ":asr_frontend",
+        ":py_utils",
+        # Additional FFT kernels dependency.
+        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
+        "//lingvo/core:test_helper",
+    ],
 )
 
 py_library(
@@ -16,6 +44,7 @@ py_library(
         ":base_layer",
         ":layers",
         ":py_utils",
+        ":quant_utils",
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
     ],
@@ -46,6 +75,7 @@ py_library(
     deps = [
         ":base_layer",
         ":beam_search_helper",
+        ":target_sequence_sampler",
     ],
 )
 
@@ -74,11 +104,51 @@ py_test(
 )
 
 py_library(
+    name = "bfloat16_variables",
+    srcs = ["bfloat16_variables.py"],
+    deps = [
+        # Implicit tensorflow dependency.
+    ],
+)
+
+py_test(
+    name = "bfloat16_variables_test",
+    srcs = ["bfloat16_variables_test.py"],
+    deps = [
+        ":bfloat16_variables",
+        # Implicit tensorflow dependency.
+    ],
+)
+
+py_library(
+    name = "target_sequence_sampler",
+    srcs = [
+        "target_sequence_sampler.py",
+    ],
+    deps = [
+        ":base_layer",
+        ":py_utils",
+        ":recurrent",
+        # Implicit tensorflow dependency.
+    ],
+)
+
+py_test(
+    name = "target_sequence_sampler_test",
+    srcs = ["target_sequence_sampler_test.py"],
+    deps = [
+        ":py_utils",
+        ":target_sequence_sampler",
+        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
+    ],
+)
+
+py_library(
     name = "base_input_generator",
     srcs = ["base_input_generator.py"],
     deps = [
         ":base_layer",
-        ":cluster_factory",
         ":input_generator_helper",
         ":py_utils",
         ":tokenizers",
@@ -92,6 +162,7 @@ py_library(
     name = "base_layer",
     srcs = ["base_layer.py"],
     deps = [
+        ":cluster_factory",
         ":hyperparams",
         ":py_utils",
         # Implicit six dependency.
@@ -116,7 +187,6 @@ py_library(
         ":base_input_generator",
         ":base_layer",
         ":build_data",
-        ":cluster_factory",
         ":early_stop",
         ":hyperparams",
         ":lr_schedule",
@@ -216,7 +286,7 @@ py_library(
     deps = [
         # Implicit numpy dependency.
         # Implicit tensorflow dependency.
-        # Implicit tensorflow contrib cudnn_rnn_py dependency.,
+        # Implicit tensorflow contrib cudnn_rnn_py dependency.
     ],
 )
 
@@ -244,10 +314,14 @@ py_test(
     name = "early_stop_test",
     size = "small",
     srcs = ["early_stop_test.py"],
+    data = [
+        "//lingvo/core/ops/testdata:best_step_testdata",
+    ],
     deps = [
         ":early_stop",
         ":hyperparams",
         # Implicit tensorflow dependency.
+        "//lingvo/core:test_helper",
     ],
 )
 
@@ -266,6 +340,46 @@ py_test(
     deps = [
         ":hyperparams",
         # Implicit tensorflow dependency.
+    ],
+)
+
+lingvo_proto_cc(
+    name = "inference_graph_proto",
+    src = "inference_graph.proto",
+)
+
+lingvo_proto_py(
+    name = "inference_graph_py_pb2",
+    src = "inference_graph.proto",
+    deps = [":inference_graph_proto"],
+)
+
+py_library(
+    name = "inference_graph_exporter",
+    srcs = ["inference_graph_exporter.py"],
+    deps = [
+        ":base_model",
+        ":bfloat16_variables",
+        ":inference_graph_py_pb2",
+        ":py_utils",
+        # Implicit python proto dependency.
+        # Implicit six dependency.
+        # Implicit tensorflow dependency.
+    ],
+)
+
+py_test(
+    name = "inference_graph_exporter_test",
+    srcs = ["inference_graph_exporter_test.py"],
+    deps = [
+        ":base_input_generator",
+        ":base_model",
+        ":base_model_params",
+        ":inference_graph_exporter",
+        ":inference_graph_py_pb2",
+        ":py_utils",
+        # Implicit tensorflow dependency.
+        "//lingvo:model_registry",
     ],
 )
 
@@ -308,6 +422,7 @@ py_library(
 lingvo_cuda_py_test(
     name = "layers_test",
     srcs = ["layers_test.py"],
+    shard_count = 20,
     deps = [
         ":layers",
         ":py_utils",
@@ -324,7 +439,6 @@ py_library(
     srcs = ["lr_schedule.py"],
     deps = [
         ":base_layer",
-        ":cluster_factory",
         ":early_stop",
         ":py_utils",
         # Implicit tensorflow dependency.
@@ -349,6 +463,7 @@ py_library(
     name = "metrics",
     srcs = ["metrics.py"],
     deps = [
+        ":py_utils",
         ":scorers",
         # Implicit six dependency.
         # Implicit tensorflow dependency.
@@ -417,14 +532,18 @@ py_test(
 py_library(
     name = "plot",
     srcs = ["plot.py"],
-    srcs_version = "PY2ONLY",  # b/111617518
     deps = [
-        # Implicit Tkinter dependency.
         # Implicit matplotlib dependency.
         # Implicit numpy dependency.
         # Implicit six dependency.
         # Implicit tensorflow dependency.
-    ],
+    ] + select({
+        "//lingvo:py3_mode": [],
+        "//conditions:default": [
+            # b/111617518
+            # Implicit Tkinter dependency.
+        ],
+    }),
 )
 
 py_test(
@@ -432,7 +551,31 @@ py_test(
     srcs = ["plot_test.py"],
     deps = [
         ":plot",
+        # Implicit numpy dependency.
         # Implicit tensorflow dependency.
+    ],
+)
+
+py_library(
+    name = "predictor_lib",
+    srcs = ["predictor.py"],
+    deps = [
+        ":inference_graph_py_pb2",
+        ":py_utils",
+        # Implicit python proto dependency.
+        # Implicit IPython dependency.
+        # Implicit six dependency.
+        # Implicit tensorflow dependency.
+        # Implicit tensorflow py proto dependency.
+    ],
+)
+
+lingvo_py_binary(
+    name = "predictor",
+    srcs = ["predictor.py"],
+    deps = [
+        ":predictor_lib",
+        "//lingvo:model_imports",
     ],
 )
 
@@ -442,9 +585,10 @@ py_library(
     deps = [
         ":hyperparams",
         ":retry",
+        # Implicit numpy dependency.
         # Implicit six dependency.
         # Implicit tensorflow dependency.
-        # Implicit tensorflow py proto dependency.,
+        # Implicit tensorflow py proto dependency.
         "//lingvo/core/ops:py_x_ops",
     ],
 )
@@ -464,6 +608,7 @@ py_test(
         # Implicit numpy dependency.
         # Implicit six dependency.
         # Implicit tensorflow dependency.
+        # Implicit tensorflow python framework_for_generated_wrappers dependency.
         "//lingvo:model_registry",
         "//lingvo/tasks/image/params:mnist",
     ],
@@ -539,6 +684,7 @@ py_library(
     name = "summary_utils",
     srcs = ["summary_utils.py"],
     deps = [
+        ":cluster_factory",
         ":plot",
         ":py_utils",
         # Implicit numpy dependency.
@@ -597,12 +743,46 @@ py_test(
 )
 
 py_library(
+    name = "wpm_encoder",
+    srcs = ["wpm_encoder.py"],
+    deps = [
+        # Implicit tensorflow dependency.
+    ],
+)
+
+py_test(
+    name = "wpm_encoder_test",
+    srcs = ["wpm_encoder_test.py"],
+    deps = [
+        ":wpm_encoder",
+        # Implicit tensorflow dependency.
+    ],
+)
+
+py_library(
     name = "tokenizers",
     srcs = ["tokenizers.py"],
     deps = [
         ":base_layer",
         ":py_utils",
+        ":wpm_encoder",
+        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
         "//lingvo/core/ops:py_x_ops",
+    ],
+)
+
+py_test(
+    name = "tokenizers_test",
+    srcs = ["tokenizers_test.py"],
+    data = [
+        "//lingvo/tasks/mt:wpm_ende",
+    ],
+    deps = [
+        ":tokenizers",
+        # Implicit numpy dependency.
+        # Implicit tensorflow dependency.
+        "//lingvo/core:test_helper",
     ],
 )
 
@@ -618,7 +798,7 @@ py_library(
         ":summary_utils",
         # Implicit six dependency.
         # Implicit tensorflow dependency.
-        # Implicit tensorflow contrib cudnn_rnn_py dependency.,
+        # Implicit tensorflow contrib cudnn_rnn_py dependency.
     ],
 )
 
@@ -668,17 +848,17 @@ py_library(
     deps = [
         ":attention",
         ":base_layer",
-        ":cluster_factory",
         ":cudnn_rnn_utils",
         ":hyperparams",
         ":layers",
         ":layers_with_attention",
         ":py_utils",
+        ":quant_utils",
         ":recurrent",
         ":rnn_cell",
         # Implicit six dependency.
         # Implicit tensorflow dependency.
-        # Implicit tensorflow contrib cudnn_rnn_py dependency.,
+        # Implicit tensorflow contrib cudnn_rnn_py dependency.
     ],
 )
 

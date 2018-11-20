@@ -25,7 +25,7 @@ from lingvo.core import layers
 from lingvo.core import layers_with_attention
 
 
-class TransformerStack(base_layer.LayerBase):
+class TransformerStack(base_layer.BaseLayer):
   """Stacked self- multi-head attention and fully connected layers.
 
   With optional layer normalization applied to the final output.
@@ -44,11 +44,6 @@ class TransformerStack(base_layer.LayerBase):
     p.Define('num_transformer_layers', 6, 'Number of transformer layers.')
     p.Define('transformer_tpl', layers_with_attention.TransformerLayer.Params(),
              'TransformerLayer params tpl.')
-
-    p.Define('random_seed', None,
-             'If set, this decides the random seed to apply in various random'
-             ' ops such that this encoder is deterministic. Set this'
-             ' random_seed only for unittests.')
 
     p.Define('ln_tpl', layers.LayerNorm.Params(), 'Layer norm default params')
     p.Define('ln_output', False,
@@ -81,7 +76,6 @@ class TransformerStack(base_layer.LayerBase):
         params.name = 'trans_%d' % (i)
         params.source_dim = p.model_dim
         params.packed_input = p.packed_input
-        params.random_seed = p.random_seed
         transformer_layer_params.append(params)
 
       self.CreateChildren('trans', transformer_layer_params)
@@ -109,7 +103,7 @@ class TransformerStack(base_layer.LayerBase):
     """Transforms source sequence of Tensors with Transformers layers.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
       transformer_input: A sequence of input Tensors of [time, batch, dim]
         shape.
@@ -119,12 +113,13 @@ class TransformerStack(base_layer.LayerBase):
          [time, batch] shape.
 
     Returns:
-      (outputs, out_paddings, segment_ids) pair. Outputs is of the shape [time,
-      batch, depth], and out_paddings is of the shape [time, batch].  If
+      (outputs, out_paddings, segment_ids) tuple. `outputs` is of the shape
+      [time, batch, depth], and `out_paddings` has shape [time, batch]. If
       is_transparent is True, can return a list of num_transformer_layers
-      tensors of shape [time, batch, depth] if p.is_eval is False, and a [time,
-      batch, depth, num_transparent_outputs] tensor if p.is_eval is True.
-      If packed_input is True, also returns segment_id, otherwise returns None.
+      tensors of shape [time, batch, depth] if `p.is_eval` is False, and a
+      [time, batch, depth, num_transparent_outputs] tensor if `p.is_eval` is
+      True. If packed_input is True, also returns segment_id, otherwise returns
+      None.
     """
     p = self.params
     if p.packed_input:

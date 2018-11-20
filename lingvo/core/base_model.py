@@ -36,7 +36,47 @@ from lingvo.core import summary_utils
 from lingvo.core import task_scheduler
 
 
-class BaseTask(base_layer.LayerBase):
+def CreateTaskGlobalStep(params, task_name):
+  """Create if needed and return the global_step."""
+  with tf.name_scope(None), tf.variable_scope(py_utils.global_variable_scope):
+    graph_collections = [tf.GraphKeys.GLOBAL_VARIABLES, 'TASK_GLOBAL_STEP']
+    _, v = py_utils.CreateVariable(
+        name=task_name + '_global_step',
+        params=py_utils.WeightParams([], py_utils.WeightInit.Constant(0),
+                                     tf.int64),
+        trainable=False,
+        collections=graph_collections)
+    summary_utils.scalar(params, v.name, v)
+    return v
+
+
+class StatsCounter(object):
+  """A single counter in TF."""
+
+  def __init__(self, name):
+    self._name = name
+    _, self._var = py_utils.CreateVariable(
+        name=name,
+        params=py_utils.WeightParams([], py_utils.WeightInit.Constant(0),
+                                     tf.int64),
+        trainable=False)
+    self._value = self._var.value() + 0  # Makes a copy.
+
+  def Value(self):
+    """Returns the current counter value."""
+    return self._value
+
+  def IncBy(self, params, delta):
+    """Increment the counter by delta and return the new value."""
+    # NOTE: We must ensure _value is computed (_var + 0) before
+    # updating _var with delta.
+    delta = tf.to_int64(delta)
+    with tf.control_dependencies([self._value]):
+      summary_utils.scalar(params, self._name, self._value)
+      return tf.identity(tf.assign_add(self._var, delta))
+
+
+class BaseTask(base_layer.BaseLayer):
   """A single encoder/decoder task.
 
   One task usually consists of one InputGenerator, one train_op,
@@ -75,6 +115,10 @@ class BaseTask(base_layer.LayerBase):
         'l2_regularizer_weight', None,
         'If not None, L2 regularization to apply to the weights. '
         'Otherwise, disable L2 regularization.')
+    tp.Define(
+        'l1_regularizer_weight', None,
+        'If not None, L1 regularization to apply to the weights. '
+        'Otherwise, disable L1 regularization.')
     tp.Define('learning_rate', 0.0, 'learning rate to use.')
     tp.Define('clip_gradient_norm_to_value', 0.0,
               'Clip gradient norm to this value.')
@@ -158,7 +202,7 @@ class BaseTask(base_layer.LayerBase):
       # generator stops after one epoch.
       if p.is_eval and p.eval:
         seq_inp = issubclass(p.input.cls,
-                             base_input_generator.BaseSequenceInputGenerator)
+                             base_input_generator.BaseInputGeneratorFromFiles)
         if p.input.num_samples == 0:
           # Dataset size is unknown. Computes eval summary based on num_samples.
           assert p.eval.samples_per_summary > 0
@@ -176,8 +220,8 @@ class BaseTask(base_layer.LayerBase):
                              'The input generator may not iterate over exactly '
                              'one epoch per run')
 
-      cluster = cluster_factory.Current()
-      with tf.device(cluster.input_device), py_utils.outside_all_rewrites():
+      with tf.device(
+          self.cluster.input_device), py_utils.outside_all_rewrites():
         self.CreateChild('input', p.input)
 
     self._var_grads = None
@@ -191,12 +235,15 @@ class BaseTask(base_layer.LayerBase):
     self._num_predictions = None
     self._train_op = None
     self._eval_metrics = {}
+    self._trainer_verbose_tensors = {}
 
+    # Create the gradient mask,
+    self._per_input_gradient_mask = None
     self._shared_global_step = py_utils.GetOrCreateGlobalStep()
     tp = p.train
     if tp:
       if tp.task_global_step:
-        self._task_global_step = py_utils.CreateTaskGlobalStep(p, p.name)
+        self._task_global_step = CreateTaskGlobalStep(p, p.name)
         self._global_step = self._task_global_step
       else:
         self._task_global_step = None
@@ -206,10 +253,11 @@ class BaseTask(base_layer.LayerBase):
           self.CreateChild('grad_norm_tracker', tp.grad_norm_tracker)
 
       self.CreateChild('lr_schedule', tp.lr_schedule)
+      self.CreateChild('optimizer', tp.optimizer)
     self._UpdateVnConfig()
 
   def ComputePredictions(self, theta, input_batch):
-    """Computes predictions for 'input_batch'.
+    """Computes predictions for `input_batch`.
 
     The output can be in the form of probablistic distributions, e.g., softmax
     logits for discrete outputs, mixture of logistics for continuous values, or
@@ -221,11 +269,11 @@ class BaseTask(base_layer.LayerBase):
     used to compute final outputs, perhaps with sampling.
 
     Args:
-      theta: A nested map object containing variable values of this task.
-      input_batch: A nested map object containing input tensors to this tower.
+      theta: A `.NestedMap` object containing variable values of this task.
+      input_batch: A `.NestedMap` object containing input tensors to this tower.
 
     Returns:
-      Predictions, in the form of a single Tensor, a NestedMap, or a namedtuple.
+      Predictions, either a single Tensor, a `.NestedMap`, or a namedtuple.
     """
     raise NotImplementedError('Abstract method')
 
@@ -233,9 +281,9 @@ class BaseTask(base_layer.LayerBase):
     """Computes loss and other metrics for the given predictions.
 
     Args:
-      theta: A nested map object containing variable values of this task.
-      input_batch: A nested map object containing input tensors to this tower.
-      predictions: The output of ComputePredictions.
+      theta: A `.NestedMap` object containing variable values of this task.
+      input_batch: A `.NestedMap` object containing input tensors to this tower.
+      predictions: The output of `ComputePredictions`.
 
     Returns:
       A dict containing str keys and (metric, weight) pairs as values, where
@@ -243,13 +291,22 @@ class BaseTask(base_layer.LayerBase):
     """
     raise NotImplementedError('Abstract method')
 
+  def ProcessFetchedTrainerVerboseTensors(self, global_step, eval_result):
+    """Called each train loop with the eval of the trainer verbose tensors.
+
+    Args:
+      global_step: eval result of the global step.
+      eval_result: eval result for the trainer_verbose_tensors set.
+    """
+    pass
+
   def FPropTower(self, theta, input_batch):
     """Forward propagation through one tower of the model.
 
     Args:
-      theta: A nested map object containing variable values of this
-        task copied to this tower's devices.
-      input_batch: A nested map object containing input tensors to this tower.
+      theta: A `.NestedMap` object containing variable values of this task
+        copied to this tower's devices.
+      input_batch: A `.NestedMap` object containing input tensors to this tower.
 
     Returns:
       A dict containing metrics pairs.
@@ -257,65 +314,79 @@ class BaseTask(base_layer.LayerBase):
     predicted = self.ComputePredictions(theta, input_batch)
     return self.ComputeLoss(theta, input_batch, predicted)
 
-  def FProp(self, theta):
+  def FProp(self, theta, input_batch):
     """Forward propagation.
 
-    This default FProp implementation here supports batch splitting in
+    This default `FProp` implementation here supports batch splitting in
     synchronous and asynchronous training when sub-classes implement
-    FPropTower.
+    `FPropTower`.
 
     Args:
-      theta: A nested map object containing weights' values of this
-        layer and its children layers.
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      input_batch: The input batch. A `NestedMap` of tensors. Or, if input batch
+        spiltting is used, a list of `NestedMap`, one for each split.
 
     Returns:
       A dict containing metrics pairs. One of the keys should be 'loss' and its
       value should be a (loss, num_predictions) pair.
     """
     p = self.params
-    cluster = cluster_factory.Current()
-
     with tf.name_scope('fprop'), tf.name_scope(p.name):
-      all_fprop_metrics = []
-
       if py_utils.use_tpu():
-        batch = self.input_generator.CreateTpuFeeds()
-        with tf.name_scope('tower_0_0'):
-          dec_metrics = self.FPropTower(theta, batch)
-        all_fprop_metrics.append(dec_metrics)
+        metrics = self._FPropTpu(theta, input_batch)
       else:
-        # Splits the input batch on the input device.
-        num_splits = cluster.num_splits_per_client
-        with tf.device(cluster.input_device):
-          batches = self.input_generator.SplitInputBatch(num_splits)
-          assert num_splits == len(batches)
+        metrics = self._FPropSplitInputBatch(theta, input_batch)
+      self._FPropMetrics(metrics)
+    return metrics
 
-        # dev_list_per_replica[i][j] is the i-th worker's j-th device.
-        dev_list_per_replica = cluster.available_devices.tolist()
+  def _FPropTpu(self, theta, input_batch):
+    p = self.params
+    with tf.name_scope('fprop'), tf.name_scope(p.name):
+      with tf.name_scope('tower_0_0'):
+        metrics = self.FPropTower(theta, input_batch)
+        metrics = py_utils.WeightedAvgOfMetrics([metrics])
+    return metrics
 
-        # Asserts invariant of the total number of splits w.r.t.,
-        # splits per worker.
-        splits_per_replica = cluster.num_splits_per_replica
-        assert num_splits == splits_per_replica * len(dev_list_per_replica)
+  def _FPropSplitInputBatch(self, theta, input_batch):
+    """Splits the input batch on the input device."""
+    cluster = self.cluster
+    num_splits = cluster.num_splits_per_client
 
-        for w_id, w_devs in enumerate(dev_list_per_replica):
-          # Make local copy of the vars, shard on devices for this worker.
-          theta_local = py_utils.CreateLocalTheta(
-              theta, w_devs, label='worker %d' % w_id)
+    if not isinstance(input_batch, list):
+      input_batch = [input_batch]
 
-          for s_id in range(splits_per_replica):
-            # s_id-th split for the w_id-th worker.
-            split_id = splits_per_replica * w_id + s_id
-            with py_utils.ModelSplit(split_id):
-              with tf.device(cluster.WorkerDeviceInModelSplit(0)):
-                with tf.name_scope('tower_%d_%d' % (w_id, s_id)):
-                  batch = self.input_generator.PreprocessInputBatch(
-                      batches[split_id])
-                  dec_metrics = self.FPropTower(theta_local, batch)
-            all_fprop_metrics.append(dec_metrics)
+    assert len(input_batch) == num_splits, (len(input_batch), num_splits)
 
-      metrics = py_utils.WeightedAvgOfMetrics(all_fprop_metrics)
+    # dev_list_per_replica[i][j] is the i-th worker's j-th device.
+    dev_list_per_replica = cluster.available_devices.tolist()
 
+    # Asserts invariant of the total number of splits w.r.t.,
+    # splits per worker.
+    splits_per_replica = cluster.num_splits_per_replica
+    assert num_splits == splits_per_replica * len(dev_list_per_replica), (
+        num_splits, splits_per_replica, len(dev_list_per_replica))
+
+    all_fprop_metrics = []
+    for w_id, w_devs in enumerate(dev_list_per_replica):
+      # Make local copy of the vars, shard on devices for this worker.
+      theta_local = py_utils.CreateLocalTheta(
+          theta, w_devs, label='worker %d' % w_id)
+
+      for s_id in range(splits_per_replica):
+        # s_id-th split for the w_id-th worker.
+        split_id = splits_per_replica * w_id + s_id
+        with py_utils.ModelSplit(split_id):
+          with tf.device(cluster.WorkerDeviceInModelSplit(0)):
+            with tf.name_scope('tower_%d_%d' % (w_id, s_id)):
+              batch = self.input_generator.PreprocessInputBatch(
+                  input_batch[split_id])
+              dec_metrics = self.FPropTower(theta_local, batch)
+        all_fprop_metrics.append(dec_metrics)
+
+    return py_utils.WeightedAvgOfMetrics(all_fprop_metrics)
+
+  def _FPropMetrics(self, metrics):
     # Adds stats about the input batch.
     metrics['num_samples_in_batch'] = (tf.convert_to_tensor(
         self.input_generator.InputBatchSize()), tf.constant(1.0))
@@ -323,19 +394,31 @@ class BaseTask(base_layer.LayerBase):
     self.AdjustEvalMetrics(metrics)
     for name, (value, weight) in six.iteritems(metrics):
       self.AddEvalMetric(name, value, weight)
-
     # Loss.
     self._loss, self._num_predicts = metrics['loss']
     self._loss = py_utils.CheckNumerics(self._loss)
 
-    return metrics
+  def GetInputBatch(self):
+    """Returns input batch from input_generator."""
+    if py_utils.use_tpu():
+      return self.input_generator.CreateTpuFeeds()
+    else:
+      cluster = self.cluster
+      num_splits = cluster.num_splits_per_client
+      with tf.device(cluster.input_device):
+        return self.input_generator.SplitInputBatch(num_splits)
 
   def AdjustEvalMetrics(self, metrics):
     pass
     
-  def FPropDefaultTheta(self):
-    """Calls FProp."""
-    return self.FProp(self.theta)
+  def FPropDefaultTheta(self, input_batch=None):
+    """Calls `FProp` with this layer's parameters."""
+    if input_batch is None:
+      input_batch = self.GetInputBatch()
+    return self.FProp(self.theta, input_batch)
+
+  def GetVarGrads(self):
+    return self._var_grads
 
   def AdjustGradients(self, vars_gradients):
     """Allow for custom gradient manipulation prior to clipping."""
@@ -345,6 +428,10 @@ class BaseTask(base_layer.LayerBase):
     """Constructs the backward graph."""
     p = self.params
     vs = self.vars
+    bprop_variable_filters = self.input_generator.GetBpropVariableFilters()
+    # Only compute the mask if the variable filters are not empty.
+    if bprop_variable_filters != [''] * len(bprop_variable_filters):
+      self._ComputeGradientMask(bprop_variable_filters)
     if p.train.bprop_variable_filter:
 
       def VariableFilter(v):
@@ -357,18 +444,42 @@ class BaseTask(base_layer.LayerBase):
       tf.logging.info('Filtered bprop variables: %s', vs)
     self._BPropForVariables(vs)
 
-  def _HasNanOrInf(self, var_grads):
-    """Returns a bool tensor to indicate if var_grads contains NaNs or Infs.
+  def _ComputeGradientMask(self, bprop_variable_filters):
+    """Compute gradient mask for each variable and bprop_variable_filters.
+
+    Note that per_input_gradient_mask[var][i] will be 1 if var matches
+    bprop_variable_filter[i], 0 otherwise.
 
     Args:
-      var_grads: A NestedMap with (var, grad) tuple as the map value.
+      bprop_variable_filters: A list of regex bprop_variable_filters for each
+        file pattern.
+    """
+    self._per_input_gradient_mask = py_utils.NestedMap()
+    all_vars = set(self.vars.Flatten())
+    for var in all_vars:
+      self._per_input_gradient_mask[var.name] = (
+          tf.zeros(len(bprop_variable_filters), dtype=tf.float32))
+      for i in range(len(bprop_variable_filters)):
+        if re.search(bprop_variable_filters[i], var.name):
+          self._per_input_gradient_mask[var.name] += (
+              tf.one_hot(i, len(bprop_variable_filters), dtype=tf.float32))
+
+  def _HasNanOrInf(self, var_grads):
+    """Returns a bool tensor to indicate if `var_grads` contains NaNs or Infs.
+
+    Args:
+      var_grads: A `.NestedMap` with (var, grad) tuple as the map value.
 
     Returns:
-      A bool scalar tensor to indicate if the var_grads contains NaNs or Infs.
+      A bool scalar tensor to indicate if the `var_grads` contains NaNs or Infs.
     """
 
     def HasNanOrInf(x):
       with tf.device(x.device):
+        if x.dtype.is_complex:
+          return tf.reduce_any(
+              [HasNanOrInf(tf.real(x)),
+               HasNanOrInf(tf.imag(x))])
         return tf.reduce_any(tf.logical_or(tf.is_nan(x), tf.is_inf(x)))
 
     return tf.reduce_any([(HasNanOrInf(g.values) if isinstance(
@@ -379,22 +490,26 @@ class BaseTask(base_layer.LayerBase):
     """Scales gradients according to training params.
 
     Args:
-      var_grads: a NestedMap whose values are (var, grad) pairs.
+      var_grads: a `.NestedMap` whose values are (var, grad) pairs.
 
     Returns:
-      (has_nan_or_inf, grad_scale, final_var_grads), where:
-        has_nan_or_inf: a scalar of 0 or 1, indicating whether there is any NaN
-          or Inf in input gradients.
-        grad_scale: the gradient scale. 0 if gradient updates should be skipped
-          for the step.
-        final_var_grads: a NestedMap whose values are (var, grad) pairs, where
-          gradients have already been scaled.
+      (has_nan_or_inf, grad_scale, final_var_grads).
+
+      - has_nan_or_inf: a scalar of 0 or 1, indicating whether there is any NaN
+        or Inf in input gradients.
+      - grad_scale: the gradient scale. 0 if gradient updates should be skipped
+        for the step.
+      - final_var_grads: a `.NestedMap` whose values are (var, grad) pairs,
+      where
+        gradients have already been scaled.
     """
     p = self.params
     tp = p.train
 
     # Computes gradients' norm and adds their summaries. Note that all_grad_norm
     # may be nan, which may cause grad_scale to be nan.
+    for name, vg in var_grads.FlattenItems():
+      summary_utils.AddNormSummary(p, name, py_utils.NestedMap(s=vg))
     _, all_grad_norm = summary_utils.AddNormSummary(p, 'all', var_grads)
     grad_norm_is_nan_or_inf = tf.logical_or(
         tf.is_nan(all_grad_norm), tf.is_inf(all_grad_norm))
@@ -437,7 +552,7 @@ class BaseTask(base_layer.LayerBase):
     """Constructs the backward graph for the given variables.
 
     Args:
-      vmap: a NestedMap of variables.
+      vmap: a `.NestedMap` of variables.
     """
     p = self.params
     tp = p.train
@@ -447,22 +562,33 @@ class BaseTask(base_layer.LayerBase):
 
     # L2 regularizer.
     if tp.l2_regularizer_weight is not None:
-      l2_loss, self._var_grads = py_utils.AdjustGradientsWithL2Loss(
-          self._var_grads, tp.l2_regularizer_weight)
+      l2_loss, self._var_grads = py_utils.AdjustGradientsWithLpLoss(
+          self._var_grads, tp.l2_regularizer_weight, p=2.0)
       summary_utils.scalar(p, 'l2_loss', l2_loss)
 
-    # Histogram summary.
-    summary_utils.CollectVarHistogram(p, self._var_grads)
+    # L1 regularizer.
+    if tp.l1_regularizer_weight is not None:
+      l1_loss, self._var_grads = py_utils.AdjustGradientsWithLpLoss(
+          self._var_grads, tp.l1_regularizer_weight, p=1.0)
+      summary_utils.scalar(p, 'l1_loss', l1_loss)
+
+    # Mask gradients only if the mask is set.
+    if self._per_input_gradient_mask:
+      bprop_onehot = self.input_generator.GetInputSourceOneHot()
+      self._var_grads = py_utils.MaskGradients(
+          self._var_grads, self._per_input_gradient_mask, bprop_onehot)
 
     # Apply gradient clipping.
     has_nan_or_inf, _, self._var_grads = self.ScaleGradients(self._var_grads)
+
+    # Histogram summary.
+    summary_utils.CollectVarHistogram(p, self._var_grads)
 
     lrs = self.lr_schedule.Value(self._global_step)
     summary_utils.scalar(p, 'lr_schedule', lrs)
     lr = tp.learning_rate * lrs
 
-    opt = tp.optimizer.cls(tp.optimizer.Copy().Set(add_summary=p.add_summary))
-    var_update_op = opt.Apply(lr, self._var_grads)
+    var_update_op = self.optimizer.Apply(lr, self._var_grads)
 
     increment_global_step_ops = []
     with tf.colocate_with(self._shared_global_step):
@@ -507,30 +633,38 @@ class BaseTask(base_layer.LayerBase):
         name='train')
 
   def ApplyExponentialMovingAverage(self, ema):
-    """Wraps self.train_op with an Op to update exponential moving average."""
-    # We need to apply EMA to all trainable variables of this Task, not just
-    # bprop vars, so that we create a shadow '/ExponentialMovingAverage'
-    # variable for every trainable variable.
-    all_vars = set(self.vars.Flatten()) & set(tf.trainable_variables())
+    """Wraps `self.train_op` with an op updating exponential moving average."""
+    # We need to apply EMA to trainable and moving average variable of this
+    # Task, not just bprop vars, so that we create a shadow
+    # '/ExponentialMovingAverage' variable for every trainable and moving
+    # average variable.
+    all_vars = set(tf.trainable_variables()) | set(
+        tf.moving_average_variables())
+    all_vars &= set(self.vars.Flatten())
     for var in all_vars:
       tf.logging.debug('ApplyExponentialMovingAverage: %s', var.name)
     with tf.control_dependencies(
         [self._train_op]), tf.name_scope('moving_average'):
       self._train_op = ema.apply(all_vars)
 
-  def Decode(self):
+  def Decode(self, input_batch):
     """Constructs the inference graph for eval decoding.
 
-    Returns a dict of tensors as decoder output.
+    Args:
+      input_batch: The input batch. A `NestedMap` of tensors. Or, if input batch
+        spiltting is used, a list of `NestedMap`, one for each split.
+
+    Returns:
+      a dict of Tensors as decoder output.
     """
-    pass
+    return {}
 
   def Inference(self):
     """Constructs the inference graph.
 
     Each subgraph represents a public API for a part of the graph which can
     be operated independently. By convention, the subgraph named 'default'
-    should perfom end to end inference via the input generator.
+    should perform end to end inference via the input generator.
 
     Note that having distinct subgraphs (e.g. 'encoder', 'decoder') is
     not just a space optimization: when driving the graph externally in an
@@ -538,31 +672,28 @@ class BaseTask(base_layer.LayerBase):
     case, the graph will be constructed with only those pieces.
 
     Returns:
-      An inference_graph_pb2.InferenceGraph message or a legacy
-      dict of {'subgraph_name': (fetches, feeds)} for each subgraph where
-      feeds and fetches are NestedMaps of public API names to internal
-      Tensor instances. Callers are responsible for handling either format.
+      An `inference_graph_pb2.InferenceGraph` message.
     """
     raise NotImplementedError('Abstract method')
 
   def CreateDecoderMetrics(self):
-    """Creates a dict of decoder metrics to be updated via PostProcessDecodeOut.
+    """Creates a dict of decoder metrics for `PostProcessDecodeOut` to update.
 
-    Returns a dict mapping from string keys to BaseMetric objects.
+    Returns a dict mapping from string keys to `.BaseMetric` objects.
     """
     pass
 
   def PostProcessDecodeOut(self, decode_out_dict, decode_metrics_dict):
-    """Post-processes decoder out, and updates contents of decode_metrics_dict.
+    """Post-processes decoder out and updates contents of `decode_metrics_dict`.
 
     Args:
       decode_out_dict: A dictionary of Tensors fetched.
-      decode_metrics_dict: A dict mapping from string key to BaseMetric object
-        as created by CreateDecoderMetrics.
+      decode_metrics_dict: A dict mapping from string key to `.BaseMetric`
+        object as created by `CreateDecoderMetrics`.
 
     Returns:
-      output_key_value_pairs: a list of (key, value) pairs that can be saved
-        (i.e. of type str, bytes, or unicode).
+      output_key_value_pairs - a list of (key, value) pairs that can be saved
+      (i.e. of type str, bytes, or unicode).
     """
     pass
 
@@ -605,12 +736,11 @@ class BaseTask(base_layer.LayerBase):
       weight: A scalar Tensor.
 
     Raises:
-      ValueError: if 'name' is already defined.
+      ValueError: if `name` is already defined.
 
     """
     if name in self._eval_metrics:
       raise ValueError('Metric %s has already been defined.' % name)
-    summary_utils.scalar(self.params, name, value)
     self._eval_metrics[name] = (value, weight)
 
   @property
@@ -618,23 +748,43 @@ class BaseTask(base_layer.LayerBase):
     """Returns the total number of training examples processed so far."""
     return self._total_examples.Value()
 
+  @property
+  def trainer_verbose_tensors(self):
+    """Return the dict of verbose tensors to eval in the training loop."""
+    return self._trainer_verbose_tensors
+
+  def AddTrainerVerboseTensor(self, name, target):
+    """Add a (set of) tensors to be evaluated in the training loop.
+
+    Args:
+      name: A python string. The name of the target(s).
+      target: A Tensor or a list or dict of Tensors.
+
+    Raises:
+      ValueError: if `name` is already defined.
+
+    """
+    if name in self._trainer_verbose_tensors:
+      raise ValueError('Verbose target %s has already been defined.' % name)
+    self._trainer_verbose_tensors[name] = target
+
   def IncrementTotalSamples(self, value=None):
     """Updates the total number of training examples with the batch size."""
     p = self.params
     if self._total_examples is None:
       with tf.variable_scope(p.name):
-        self._total_examples = py_utils.StatsCounter('total_samples')
+        self._total_examples = StatsCounter('total_samples')
     if value is None:
       assert self.input_generator is not None, ('No input generator defined')
       value = self.input_generator.InputBatchSize()
     return self._total_examples.IncBy(p, value)
 
   def IncrementTotalNans(self, value):
-    """Updates the total number of NaN/Inf gradients by 'value'."""
+    """Updates the total number of NaN/Inf gradients by `value`."""
     if self._total_nans_and_infs is None:
       with tf.variable_scope(
           py_utils.global_variable_scope, reuse=tf.AUTO_REUSE):
-        self._total_nans_and_infs = py_utils.StatsCounter('total_nan_gradients')
+        self._total_nans_and_infs = StatsCounter('total_nan_gradients')
     return self._total_nans_and_infs.IncBy(self.params, value)
 
   def _UpdateVnConfig(self):
@@ -649,7 +799,7 @@ class BaseTask(base_layer.LayerBase):
       else:
         # vn.scale is dependent on global_step.
         p.vn.scale = tf.cast(self._global_step > tp.vn_start_step,
-                             p.dtype) * tp.vn_std
+                             py_utils.FPropDtype(p)) * tp.vn_std
 
   def _GetMaskUpdateOp(self):
     """Returns op to update masks and threshold variables for model pruning."""
@@ -671,7 +821,7 @@ class DistillationTask(BaseTask):
   """A task to distill knowledge from a teacher task to a student task.
 
   The training parameters (e.g., learning rate) are determined only by
-  DistillationTask.params.train. Teacher and student task's training and eval
+  `DistillationTask.params.train`. Teacher and student task's training and eval
   parameters must be set to None.
   """
 
@@ -783,8 +933,8 @@ class DistillationTask(BaseTask):
     # Only bprop on student variables.
     self._BPropForVariables(self.student.vars)
 
-  def Decode(self):
-    return self.student.Decode()
+  def Decode(self, input_batch):
+    return self.student.Decode(input_batch)
 
   def Inference(self):
     return self.student.Inference()
@@ -796,7 +946,7 @@ class DistillationTask(BaseTask):
     return self.student.PostProcessDecodeOut(dec_out_dict, dec_metrics_dict)
 
 
-class BaseModel(base_layer.LayerBase):
+class BaseModel(base_layer.BaseLayer):
   """The abstract model class. All models are sub-class of this class."""
 
   @classmethod
@@ -878,8 +1028,9 @@ class BaseModel(base_layer.LayerBase):
 
     Args:
       task_name: string, the name of the model task to be returned.
+
     Returns:
-      An instance of BaseTask.
+      An instance of `BaseTask`.
     """
     raise NotImplementedError('Abstract method')
 
@@ -901,9 +1052,24 @@ class SingleTaskModel(BaseModel):
   """Model that consists of a single task."""
 
   @classmethod
-  def Params(cls):
+  def Params(cls, task_params=None):
     p = super(SingleTaskModel, cls).Params()
     p.Define('task', None, 'Task Params.')
+
+    if task_params is not None:
+      # Copy over model parameters from the task parameters.
+      p.task = task_params
+      base_layer.BaseLayer.CopyBaseParams(p.task, p)
+      tp = p.train
+      tp.start_up_delay_steps = p.task.train.start_up_delay_steps
+      tp.max_steps = p.task.train.max_steps
+      tp.tpu_steps_per_loop = p.task.train.tpu_steps_per_loop
+      tp.ema_decay = p.task.train.ema_decay
+      # init_from_checkpoint_rules does not need to be copied.
+      tp.early_stop = p.task.train.early_stop
+      tp.save_interval_seconds = p.task.train.save_interval_seconds
+      tp.summary_interval_steps = p.task.train.summary_interval_steps
+
     return p
 
   @base_layer.initializer

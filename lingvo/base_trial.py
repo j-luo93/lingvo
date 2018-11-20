@@ -57,21 +57,25 @@ class Trial(object):
     raise NotImplementedError('Abstract method')
 
   def OverrideModelParams(self, model_params):
-    """Modifies 'model_params' according to trial params.
+    """Modifies `model_params` according to trial params.
 
-    Through this method a Trial may tweak model hyperparams (e.g., learning
+    Through this method a `Trial` may tweak model hyperparams (e.g., learning
     rate, shape, depth, or width of networks).
 
     Args:
       model_params: the original model hyperparams.
 
     Returns:
-      The modified model_params.
+      The modified `model_params`.
     """
     raise NotImplementedError('Abstract method')
 
   def ShouldStop(self):
     """Returns whether the trial should stop."""
+    raise NotImplementedError('Abstract method')
+
+  def ReportDone(self):
+    """Report that the trial is completed."""
     raise NotImplementedError('Abstract method')
 
   def ShouldStopAndMaybeReport(self, global_step, metrics_dict):
@@ -93,7 +97,7 @@ class Trial(object):
   def _DoReportTrainingProgress(self, global_step, metrics_dict):
     raise NotImplementedError('Abstract method')
 
-  def ReportEvalMeasure(self, global_step, is_final, metrics_dict):
+  def ReportEvalMeasure(self, global_step, metrics_dict, checkpoint_path):
     """Reports eval measurement and returns whether the trial should stop."""
     raise NotImplementedError('Abstract method')
 
@@ -113,11 +117,13 @@ class NoOpTrial(Trial):
   def ShouldStop(self):
     return False
 
+  def ReportDone(self):
+    return False
+
   def ShouldStopAndMaybeReport(self, global_step, metrics_dict):
     del global_step, metrics_dict  # Unused
     return False
 
-  def ReportEvalMeasure(self, global_step, is_final, metrics_dict):
-    del global_step, is_final, metrics_dict  # Unused
+  def ReportEvalMeasure(self, global_step, metrics_dict, checkpoint_path):
+    del global_step, metrics_dict, checkpoint_path  # Unused
     return False
-

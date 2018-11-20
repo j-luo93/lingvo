@@ -34,18 +34,18 @@ class _BaseModelParams(object):
       dataset: A python string. Typically, 'Dev', 'Test', etc.
 
     Returns:
-      If there is a cls.${dataset} method defined, call that method to
+      If there is a `cls.${dataset}` method defined, call that method to
       generate a hyperparam for the input data.
 
     Raises:
-      AttributeError if there is not ${dataset} method defined under cls.
+      AttributeError: if there is not a `${dataset}` method defined under `cls`.
     """
     f = getattr(cls, dataset)
     return f()
 
 
 class SingleTaskModelParams(_BaseModelParams):
-  """Model Params for a SingleTaskModel."""
+  """Model Params for a `.SingleTaskModel`."""
 
   @classmethod
   def Train(cls):
@@ -74,23 +74,13 @@ class SingleTaskModelParams(_BaseModelParams):
   def Model(cls):
     """Returns model params.
 
-    Emulates structure of MultiTaskModelParams.
+    Emulates structure of `MultiTaskModelParams`.
     """
-    p = base_model.SingleTaskModel.Params()
-    p.task = cls.Task()
-    # Copy over model parameters from the task parameters.
-    tp = p.train
-    tp.start_up_delay_steps = p.task.train.start_up_delay_steps
-    tp.max_steps = p.task.train.max_steps
-    tp.ema_decay = p.task.train.ema_decay
-    tp.early_stop = p.task.train.early_stop
-    tp.save_interval_seconds = p.task.train.save_interval_seconds
-    tp.summary_interval_steps = p.task.train.summary_interval_steps
-    return p
+    return base_model.SingleTaskModel.Params(cls.Task())
 
 
 class MultiTaskModelParams(_BaseModelParams):
-  """Model Params for a MultiTaskModel."""
+  """Model Params for a `.MultiTaskModel`."""
 
   @classmethod
   def Train(cls):

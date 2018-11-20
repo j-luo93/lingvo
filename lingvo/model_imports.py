@@ -32,9 +32,11 @@ _TASK_ROOT = 'lingvo.tasks'
 
 # LINT.IfChange(task_dirs)
 _TASK_DIRS = [
+    'asr',
     'image',
     'lm',
     'mt',
+    'punctuator',
 ]
 # LINT.ThenChange(tasks/BUILD:task_dirs)
 

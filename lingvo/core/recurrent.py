@@ -16,22 +16,27 @@
 
 The main interface of this module is Recurrent().
 This expects the caller to describe the recurrent neural net by specifying:
-  theta: the "weights" each RNN uses.
-  state0: the initial state of each RNN.
-  cell_fn: A python function describing RNN cell. It must has the following
-    signature:
-         cell_fn: (theta, state0, inputs) -> (state1, extras)
+
+  - theta: the "weights" each RNN uses.
+  - state0: the initial state of each RNN.
+  - cell_fn: A python function describing RNN cell. It must has the following
+    signature::
+
+        cell_fn: (theta, state0, inputs) -> (state1, extras)
+
     state1 is the next RNN state, extras are computed by cell_fn
     and the library forwards extras to cell_fn's gradient function.
-  cell_grad: A python function describing the backprop gradient function
-    for the RNN cell. It must has the following signature:
-         cell_grad: (theta, state0, inputs, extras, dstate1) -> (
-                  dtheta, dstate0, dinputs)
+  - cell_grad: A python function describing the backprop gradient function
+    for the RNN cell. It must has the following signature::
+
+        cell_grad: (theta, state0, inputs, extras, dstate1) ->
+            (dtheta, dstate0, dinputs)
+
     dstate1 is what the backprop algorithm provides representing
     gradients of state1 w.r.t. the final loss.
 
-All of theta, state0, inputs, extras and dstate1 are
-py_utils.NestedMap so that they can carry a bunch of tensors around.
+All of `theta`, `state0`, `inputs`, `extras` and `dstate1` are
+`.NestedMap` so that they can carry a bunch of tensors around.
 """
 
 from __future__ import absolute_import
@@ -66,15 +71,17 @@ def _AssertSameTensors(list_a, list_b):
 
 
 def _Index(nmap, index):
-  """Returns a NestedMap with x[index, :] for each tensor x in nmap.
+  """Returns a `.NestedMap` with x[index, :] for each tensor x in nmap.
 
   Args:
-    nmap: A NestedMap of tensors.
-    index: A tf scalar integer. Performance is better if 'index' is
-      on the host memory.
+    nmap: A `.NestedMap` of tensors.
+    index: A tf scalar integer. Performance is better if 'index' is on the host
+      memory.
 
   Returns:
-    A NestedMap of tensors. For each key in nmap, rets.key = nmap.key[index, :].
+    A `.NestedMap` of tensors. For each key in nmap::
+
+      rets.key = nmap.key[index, :]
   """
   index = tf.convert_to_tensor(index)
   index.get_shape().assert_has_rank(0)
@@ -85,15 +92,16 @@ def _Update(nmap_acc, nmap_x, t):
   """Updates t-th row in accumulators.
 
   Args:
-    nmap_acc: A NestedMap of tensors. The accumulators.
-    nmap_x: A NestedMap of tensors. The update values.
+    nmap_acc: A `.NestedMap` of tensors. The accumulators.
+    nmap_x: A `.NestedMap` of tensors. The update values.
     t: A scalar integer. Performance is better if 't' is on the device
       memory.
 
   Returns:
-    A NestedMap of tensors. Say, ret is returned. For each key, we have
-      ret[key] = nmap_acc[key];
-      ret[key][t, :] = nmap_x[key]
+    A `.NestedMap` of tensors. Say, ret is returned. For each key, we have::
+
+        ret[key] = nmap_acc[key];
+        ret[key][t, :] = nmap_x[key]
   """
   acc_lst = nmap_acc.Flatten()
   x_lst = nmap_x.Flatten()
@@ -110,7 +118,7 @@ def _SeqLenDim(nmap):
   This is the max sequence length according to the shape of the inputs.
 
   Args:
-    nmap: A NestedMap of tensors. Every tensor's 0-th dim has the same size.
+    nmap: A `.NestedMap` of tensors. Every tensor's 0-th dim has the same size.
 
   Returns:
     A scalar tensor which is the size of 0-th dim of every tensors in nmap.
@@ -134,11 +142,11 @@ def _SeqPaddingLength(inputs_nmap):
   """Returns the lengths of paddings at the beginning and end of the sequence.
 
   Args:
-    inputs_nmap: A NestedMap of tensors that may have 'padding'
+    inputs_nmap: A `.NestedMap` of tensors that may have 'padding'
                  Every tensor's 0-th dim has the same size.
 
   Returns:
-    [padding length at the beginning, padding length at the end]
+    padding length at the beginning, padding length at the end
   """
   padding = inputs_nmap.get('padding')
   if padding is None:
@@ -156,7 +164,7 @@ def _SeqPaddingLength(inputs_nmap):
 
 
 def _Flatten(nmap_list):
-  """Flattens every NestedMap in nmap_list and concatenate them."""
+  """Flattens every `.NestedMap` in nmap_list and concatenate them."""
   ret = []
   for x in nmap_list:
     ret += x.Flatten()
@@ -164,16 +172,17 @@ def _Flatten(nmap_list):
 
 
 def _Pack(flatten, nmap_list):
-  """Packs the list of tensors according to nested maps in nmap_list.
+  """Packs the list of tensors according to `.NestedMap` in `nmap_list`.
 
-  _Pack is loosely the inverse of _Flatten.
+  `_Pack` is loosely the inverse of `_Flatten`.
 
   Args:
     flatten: A list of tensors.
-    nmap_list: A list of NestedMap.
+    nmap_list: A list of `.NestedMap`.
 
   Returns:
-    A list of NestedMap, say ret is the returned list. We have
+    A list of `.NestedMap`, say ret is the returned list. We have
+
       1. len(ret) == len(nmap_list);
       2. recursively, ret[i] has the same keys as nmap_list[i];
       3. _Flatten(ret) == flatten;
@@ -195,10 +204,10 @@ def _EmptyAcc(slen, nmap):
 
   Args:
     slen: A scalar tensor.
-    nmap: A NestedMap of tensors.
+    nmap: A `.NestedMap` of tensors.
 
   Returns:
-    A NestedMap with the same keys as nmap. ret.key, a tensor, has the
+    A `.NestedMap` with the same keys as nmap. ret.key, a tensor, has the
     same dtype as nmap.key. The tensor's shape has 1 more dimension
     than the tensor nmap.key. The extra 0-th dimension is of size
     slen. E.g., if slen=10 and nmap.key's shape is [3, 5], then,
@@ -212,14 +221,30 @@ def _EmptyAcc(slen, nmap):
   return nmap.Transform(Fill)
 
 
+def _EmptyWithFixShape(shape, nmap):
+  """Creates a set of empty initialized tensors with fixed shape.
+
+  Args:
+    shape: A list of integers to describe the output tensor shape.
+    nmap: A `.NestedMap` of tensors.
+
+  Returns:
+    A `.NestedMap` with the same keys as nmap. ret.key, a tensor, has the
+    same dtype as nmap.key, but with the fixed shape.
+  """
+
+  return nmap.Transform(
+      lambda x: inplace_ops.empty(shape, dtype=x.dtype, init=True))
+
+
 def _EmptyLike(nmap):
   """Creates a set of empty initialized tensors.
 
   Args:
-    nmap: A NestedMap of tensors.
+    nmap: A `.NestedMap` of tensors.
 
   Returns:
-    A NestedMap of tensors. Each tensor has the same shape and dtype as
+    A `.NestedMap` of tensors. Each tensor has the same shape and dtype as
     its corresponding tensor in nmap. And each tensor is initialized.
   """
   return nmap.Transform(lambda x: inplace_ops.empty_like(x, init=True))
@@ -234,11 +259,11 @@ def _Add(nmap_x, nmap_y):
   """Adds tensors in nmap_x with respective tensors in nmap_y.
 
   Args:
-    nmap_x: A NestedMap of tensors.
-    nmap_y: A NestedMap of tensors.
+    nmap_x: A `.NestedMap` of tensors.
+    nmap_y: A `.NestedMap` of tensors.
 
   Returns:
-    A NestedMap of tensors. ret.key = nmap_x.key + nmap_y.key for every key.
+    A `.NestedMap` of tensors. ret.key = nmap_x.key + nmap_y.key for every key.
   """
   x_lst = nmap_x.Flatten()
   y_lst = nmap_y.Flatten()
@@ -264,7 +289,7 @@ def _ConvertNoneGradientToZeros(xs, dxs):
     dxs: A list of tensors. dxs[i] corresponds to xs[i]'s gradient.
 
   Returns:
-    A NestedMap same as dxs with None replaced by a zero tensor.
+    A `.NestedMap` same as dxs with None replaced by a zero tensor.
   """
   xs_lst = _Flatten(xs)
   dxs_lst = _Flatten(dxs)
@@ -295,7 +320,8 @@ class _Recurrent(object):
                state0,
                inputs,
                extras,
-               implicit_captures=None):
+               implicit_captures=None,
+               unused_acc_state=None):
     """RNN helper class.
 
     Args:
@@ -304,15 +330,20 @@ class _Recurrent(object):
       cell_grad: A python function which computes:
          dtheta, dstate0, dinputs[t, :] = cell_grad(
            theta, state0, inputs[t, :], extras, dstate1)
-      theta: weights. A NestedMap.
-      state0: initial state. A NestedMap.
-      inputs: inputs. A NestedMap.
-      extras: A NestedMap of Tensors. The 2nd return value of every
-        invocation of cell_fn is a NestedMap with matching keys and shapes
+      theta: weights. A `.NestedMap`.
+      state0: initial state. A `.NestedMap`.
+      inputs: inputs. A `.NestedMap`.
+      extras: A `.NestedMap` of Tensors. The 2nd return value of every
+        invocation of cell_fn is a `.NestedMap` with matching keys and shapes
         of this 'extras'.
-      implicit_captures: A NestedMap corresponding to implicit captures of
+      implicit_captures: A `.NestedMap` corresponding to implicit captures of
         the cell_fn. If empty/None, implicit captures are either not present
         or disallowed.
+      unused_acc_state: If None, we assume every field of acc_state is consumed
+        in the following timestamps. If True, None of the acc_state is consumed.
+        And we reduce_sum each timestep's new state into a scalar.
+        Note, this feature should be used with StackedRecurrent where we send
+        out the new state to the other devices.
     """
     self._theta = theta
     self._state = state0
@@ -321,6 +352,7 @@ class _Recurrent(object):
     self._cell_grad = cell_grad
     self._extras = extras
     self._implicit_captures = implicit_captures
+    self._unused_acc_state = unused_acc_state
 
     if self._implicit_captures is None:
       self._implicit_captures = _EmptyCaptures()
@@ -377,8 +409,10 @@ class _Recurrent(object):
           Fwd(*_Flatten([theta, state0, inputs_t])),
           [self._state, self._extras])
       # Saves state1 and extras in their accumulators.
-      acc_state = _Update(acc_state, state1, dev_t)
+      if not self._unused_acc_state:
+        acc_state = _Update(acc_state, state1, dev_t)
       acc_extras = _Update(acc_extras, extras, dev_t)
+
       return [tf.add(dev_t, 1)] + _Flatten(
           [theta, state1, inputs, acc_state, acc_extras])
 
@@ -474,6 +508,12 @@ class _Recurrent(object):
       # construction, it must be zeros).
       d_acc_state, d_state1, _ = _Pack(args,
                                        [self._state, self._state, self._extras])
+
+      if self._unused_acc_state:
+        # XLA While op requires the same shape for the init and carry on values.
+        state0 = state0.Transform(tf.reduce_sum)
+        d_state1 = d_state1.Transform(tf.reduce_sum)
+
       return Backward(*_Flatten([
           theta,
           state0,
@@ -499,7 +539,10 @@ class _Recurrent(object):
       slen_dim = _SeqLenDim(inputs)
 
       # Creates accumulators for state0 and extras.
-      acc_state = _EmptyAcc(slen_dim, state0)
+      if self._unused_acc_state:
+        acc_state = _EmptyWithFixShape([slen_dim], state0)
+      else:
+        acc_state = _EmptyAcc(slen_dim, state0)
       acc_extras = _EmptyAcc(slen_dim, extras)
 
       if py_utils.use_tpu():
@@ -647,6 +690,10 @@ class _Recurrent(object):
       (d_theta_t, d_state0, d_inputs_t, d_captured_t) = _Pack(
           Bak(*_Flatten([theta, state0, inputs_t, extras_t, d_state1])),
           [self._theta, self._state, self._inputs, self._implicit_captures])
+
+      if self._unused_acc_state:
+        # XLA IF op requires the same shape for if and else branches.
+        d_state0 = d_state0.Transform(tf.reduce_sum)
       d_theta = _Add(d_theta, d_theta_t)
       d_inputs = _Update(d_inputs, d_inputs_t, dev_t)
       d_captured = _Add(d_captured, d_captured_t)
@@ -736,6 +783,9 @@ class _Recurrent(object):
       _AssertSameTensors(function.get_extra_inputs(),
                          self._implicit_captures.Flatten())
 
+      if self._unused_acc_state:
+        # Match the shape of gradient of the init_state.
+        d_state0 = self._state.Transform(tf.zeros_like)
       return _Flatten([d_theta, d_state0, d_inputs, acc_extras, d_captured])
 
     self._forward = Forward
@@ -753,16 +803,19 @@ def _GetCellGrad(cell_fn, cell_grad, implicit_captures=None):
   Args:
     cell_fn: The recurrent neural net's cell function.
     cell_grad: If not None, cell_fn's gradient function.
-    implicit_captures: NestedMap of implicit captures that cell_fn
+    implicit_captures: `.NestedMap` of implicit captures that cell_fn
         does. If None, then no captures are supported.
 
   Returns:
     Returns cell_grad if not None. Otherwise, assume cell_fn is a python
-    function representing the recurrent neural net's cell function, i.e.,
+    function representing the recurrent neural net's cell function, i.e.::
+
       cell_fn: (theta, state0, inputs) -> (state1, extra)
-    returns its default gradient python function, i.e.,
-      cell_grad: (theta, state0, inputs, extras, captured, dstate1) -> (
-                  dtheta, dstate0, dinputs)
+
+    returns its default gradient python function, i.e.::
+
+      cell_grad: (theta, state0, inputs, extras, captured, dstate1) ->
+          (dtheta, dstate0, dinputs)
   """
 
   if cell_grad:
@@ -852,14 +905,14 @@ def _ReflectOnCellFn(cell_fn,
   Args:
     cell_fn: A python function that computes:
       state1, extras = cell_fn(theta, state0, inputs[t, :])
-    theta: weights. A NestedMap.
-    state0: initial state. A NestedMap.
-    inputs: inputs. A NestedMap.
+    theta: weights. A `.NestedMap`.
+    state0: initial state. A `.NestedMap`.
+    inputs: inputs. A `.NestedMap`.
     accumulator_layer: Whether the cell function must be run in the context
         of the given accumulator layer.
-    check_stateful_ops: if True, raise a ValueError if cell_fn is stateful.
+    check_stateful_ops: if True, raise a `ValueError` if cell_fn is stateful.
   Returns:
-    NestedMap of implicit captures that the cell_fn takes.
+    `.NestedMap` of implicit captures that the cell_fn takes.
   Raises:
     ValueError: cell_fn is stateful.
   """
@@ -926,55 +979,60 @@ def Recurrent(theta,
               allow_implicit_capture=False):
   """Compute a recurrent neural net.
 
-  Roughly, Recurrent() computes the following:
-    state = state0
-    for t in inputs' sequence length:
-      state = cell_fn(theta, state, inputs[t, :])
-      accumulate_state[t, :] = state
-    return accumulate_state, state
+  Roughly, `Recurrent()` computes the following::
 
-  theta, state, inputs are all NestedMap objects.
+      state = state0
+      for t in inputs' sequence length:
+        state = cell_fn(theta, state, inputs[t, :])
+        accumulate_state[t, :] = state
+      return accumulate_state, state
 
-  inputs[t, :] means taking a slice out from every tensor in the
-  NestedMap inputs.
+  `theta`, `state`, `inputs` are all `.NestedMap` objects.
 
-  accumulate_state[t, :] = state means that we stash every tensor in
-  'state' into a slice of the corresponding tensor in
-  accumulate_state.
+  `inputs[t, :]` means taking a slice out from every tensor in the
+  `.NestedMap` `inputs`.
 
-  cell_fn is a python callable computing (building up a TensorFlow
-  graph) the recurrent neural network's one forward step. cell_fn must not
-  contain any stateful op. Two calls of cell_fn must describe two identical
+  `accumulate_state[t, :] = state` means that we stash every tensor in
+  `state` into a slice of the corresponding tensor in
+  `accumulate_state`.
+
+  `cell_fn` is a python callable computing (building up a TensorFlow
+  graph) the recurrent neural network's one forward step. `cell_fn` must not
+  contain any stateful ops. Two calls of `cell_fn` must describe two identical
   computations.
 
-  By construction, Recurrent()'s backward computation does not access
-  any intermediate values computed by cell_fn during forward
-  computation. We may extend Recurrent() to support that by taking a
-  customized backward function of cell_fn.
+  By construction, `Recurrent()`'s backward computation does not access
+  any intermediate values computed by `cell_fn` during forward
+  computation. We may extend `Recurrent()` to support that by taking a
+  customized backward function of `cell_fn`.
 
   Args:
-    theta: weights. A NestedMap.
-    state0: initial state. A NestedMap.
-    inputs: inputs. A NestedMap.
-    cell_fn: A python function, which computes:
-      state1, extras = cell_fn(theta, state0, inputs[t, :])
-    cell_grad: A python function which computes:
-      dtheta, dstate0, dinputs[t, :], dcaptured = cell_grad(
-        theta, state0, inputs[t, :], extras, dstate1)
-      If there are no captured tensors in cell_fn, dcaptured can be returned
-      as None. Captured tensors with custom cell_grad is currently unsupported,
+    theta: weights. A `.NestedMap`.
+    state0: initial state. A `.NestedMap`.
+    inputs: inputs. A `.NestedMap`.
+    cell_fn: A python function, which computes::
+
+        state1, extras = cell_fn(theta, state0, inputs[t, :])
+
+    cell_grad: A python function which computes::
+
+        dtheta, dstate0, dinputs[t, :], dcaptured = cell_grad(
+            theta, state0, inputs[t, :], extras, dstate1)
+
+      If there are no captured tensors in `cell_fn`, `dcaptured` can be returned
+      as None. Captured tensors with custom `cell_grad` is currently unsupported
       so this return value is reserved for future expansion.
-    extras: A NestedMap of Tensors. The 2nd return value of every
-      invocation of cell_fn is a NestedMap with matching keys and shapes
-      of  this 'extras'.
-    check_stateful_ops: if True, raise a ValueError if cell_fn is stateful.
+    extras: A `.NestedMap` of Tensors. The 2nd return value of every
+      invocation of `cell_fn` is a `.NestedMap` with matching keys and shapes
+      of `extras`.
+    check_stateful_ops: if True, raise a `ValueError` if `cell_fn` is stateful.
     accumulator_layer: If provided, then accumulators on this layer will be
-      managed such that they carry to the final state in FProp and are
-      disabled for gradients. Uses the state key 'accumulators'.
-    allow_implicit_capture: Whether to allow the cell_fn to implicitly
-      capture tensors. Only allowed if an explicit cell_grad is not given.
+      managed such that they carry to the final state in `FProp` and are
+      disabled for gradients. Uses the state key `accumulators`.
+    allow_implicit_capture: Whether to allow the `cell_fn` to implicitly
+      capture tensors. Only allowed if an explicit `cell_grad` is not given.
   Returns:
-    accumulate_state and the final state.
+    `accumulate_state` and the final state.
   """
   inputs = _TransformDType(inputs)
 

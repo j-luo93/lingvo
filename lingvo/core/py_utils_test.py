@@ -53,7 +53,7 @@ class PyUtilsTest(tf.test.TestCase):
           py_utils.WeightInit.UniformUnitScaling,
           py_utils.WeightInit.TruncatedGaussianSqrtDim,
       ]
-      dtypes = [tf.float32, tf.float64]
+      dtypes = [tf.float32, tf.float64, tf.complex64]
       shapes = [[], [3], [2, 4]]
       collections = ['col1', 'col2']
 
@@ -88,11 +88,11 @@ class PyUtilsTest(tf.test.TestCase):
           py_utils.WeightInit.UniformSqrtDim,
           py_utils.WeightInit.UniformUnitScaling,
       ]
-      dtypes = [tf.float32]
+      dtypes = [tf.float32, tf.complex64]
       shapes = [[2, 3]]
       all_vars = []
-      for i, (m, dt, sp) in enumerate(
-          itertools.product(methods, dtypes, shapes)):
+      for i, (dt, m, sp) in enumerate(
+          itertools.product(dtypes, methods, shapes)):
         pc = py_utils.WeightParams(sp, m(0.1), dt)
         all_vars.append(py_utils.CreateVariable('var_%d' % i, pc)[0])
 
@@ -100,12 +100,18 @@ class PyUtilsTest(tf.test.TestCase):
                      [-0.052155, -0.050274, 0.086218]]
       v2_v_expted = [[0.005361, 0.036109, -0.036575],
                      [0.058314, 0.031438, 0.049196]]
+      v4_v_expted = [
+          [0.015448 + 0.068295j, -0.098710 - 0.054435j, 0.037030 - 0.048017j],
+          [-0.047435 + 0.035301j, 0.041994 + 0.000279j, -0.029097 + 0.084902j],
+      ]
 
       tf.global_variables_initializer().run()
       v1_v = all_vars[0].eval()
       v2_v = all_vars[1].eval()
+      v4_v = all_vars[3].eval()
       self.assertAllClose(v1_v_expted, v1_v.tolist())
       self.assertAllClose(v2_v_expted, v2_v.tolist())
+      self.assertAllClose(v4_v_expted, v4_v.tolist())
 
   def testCreateVariableNormal(self):
     with self.session(use_gpu=False, graph=tf.Graph()):
@@ -114,11 +120,11 @@ class PyUtilsTest(tf.test.TestCase):
           py_utils.WeightInit.Gaussian,
           py_utils.WeightInit.GaussianSqrtDim,
       ]
-      dtypes = [tf.float32]
+      dtypes = [tf.float32, tf.complex64]
       shapes = [[2, 3]]
       all_vars = []
-      for i, (m, dt, sp) in enumerate(
-          itertools.product(methods, dtypes, shapes)):
+      for i, (dt, m, sp) in enumerate(
+          itertools.product(dtypes, methods, shapes)):
         pc = py_utils.WeightParams(sp, m(), dt)
         all_vars.append(py_utils.CreateVariable('var_%d' % i, pc)[0])
 
@@ -126,12 +132,18 @@ class PyUtilsTest(tf.test.TestCase):
                      [-0.461884, 1.018134, 0.063719]]
       v2_v_expted = [[-0.862255, -0.688153, 0.82515],
                      [-0.07671, 0.613031, -0.020327]]
+      v3_v_expted = [
+          [1.005469 + 0.827639j, 1.249896 + 0.802671j, -0.026286 - 0.813836j],
+          [0.865386 + 0.301172j, 0.876698 - 0.907293j, 1.996337 + 1.840192j],
+      ]
 
       tf.global_variables_initializer().run()
       v1_v = all_vars[0].eval()
       v2_v = all_vars[1].eval()
+      v3_v = all_vars[2].eval()
       self.assertAllClose(v1_v_expted, v1_v.tolist())
       self.assertAllClose(v2_v_expted, v2_v.tolist())
+      self.assertAllClose(v3_v_expted, v3_v.tolist())
 
   def testCreateVariableException(self):
     with self.session(use_gpu=False, graph=tf.Graph()):
@@ -144,7 +156,7 @@ class PyUtilsTest(tf.test.TestCase):
       var2 = py_utils.CreateVariable('var1', pc)[0]
 
       # An exception should be thrown in this case.
-      pc.init.scale = 2.0
+      pc = py_utils.WeightParams([2, 3], py_utils.WeightInit.Gaussian(2.0))
       with self.assertRaises(AssertionError):
         py_utils.CreateVariable('var1', pc)
 
@@ -170,7 +182,7 @@ class PyUtilsTest(tf.test.TestCase):
     with self.session(use_gpu=False, graph=tf.Graph()):
       tf.set_random_seed(1618)
       methods = [py_utils.WeightInit.Xavier]
-      dtypes = [tf.float32, tf.float16]
+      dtypes = [tf.float32, tf.float16, tf.complex64]
       shapes = [[2, 3]]
       all_vars = []
       for i, (m, dt, sp) in enumerate(
@@ -180,16 +192,22 @@ class PyUtilsTest(tf.test.TestCase):
 
       v1_v_expted = [[1.051236, -0.959198, 0.796091],
                      [-0.685691, 0.230933, -1.006293]]
+      v3_v_expted = [
+          [0.149996 - 0.064369j, 0.689145 + 0.017257j, -0.502070 - 0.367683j],
+          [0.519782 + 0.470412j, 0.738902 - 0.054006j, 0.028603 + 0.471832j],
+      ]
 
       tf.global_variables_initializer().run()
       v1_v = all_vars[0].eval()
+      v3_v = all_vars[2].eval()
       self.assertAllClose(v1_v_expted, v1_v.tolist())
+      self.assertAllClose(v3_v_expted, v3_v.tolist())
 
   def testXavier1D(self):
     with self.session(use_gpu=False, graph=tf.Graph()):
       tf.set_random_seed(1618)
       methods = [py_utils.WeightInit.Xavier]
-      dtypes = [tf.float32, tf.float16]
+      dtypes = [tf.float32, tf.float16, tf.complex64]
       shapes = [[2]]
       all_vars = []
       for i, (m, dt, sp) in enumerate(
@@ -207,7 +225,7 @@ class PyUtilsTest(tf.test.TestCase):
     with self.session(use_gpu=False, graph=tf.Graph()):
       tf.set_random_seed(1618)
       methods = [py_utils.WeightInit.Xavier]
-      dtypes = [tf.float32, tf.float16]
+      dtypes = [tf.float32, tf.float16, tf.complex64]
       shapes = [[1, 1, 2]]
       all_vars = []
       for i, (m, dt, sp) in enumerate(
@@ -239,6 +257,30 @@ class PyUtilsTest(tf.test.TestCase):
 
       with self.assertRaisesRegexp(tf.errors.InvalidArgumentError, 'NaN'):
         sess.run(py_utils.CheckNumerics(z))
+
+  def testLog(self):
+    with self.session():
+      x = tf.constant([[1, 2], [3, 4]])
+      y = tf.constant([10] * 4)
+      x = py_utils.Log(x, 'testLog', x=x, y=y)
+      self.assertAllEqual(x.eval(), [[1, 2], [3, 4]])
+
+  def testSave(self):
+    g = tf.Graph()
+    with g.as_default():
+      x = tf.constant([[1, 2], [3, 4]])
+      y = tf.constant([10] * 4)
+      x = py_utils.Save(x, '%s/test' % self.get_temp_dir(), x=x, y=y)
+
+    with self.session(graph=g) as sess:
+      sess.run(tf.global_variables_initializer())
+      self.assertAllEqual(sess.run(x), [[1, 2], [3, 4]])
+
+    # Reads npy files and check the values.
+    read_x = np.load('%s/test.%08d.x.npy' % (self.get_temp_dir(), 0))
+    read_y = np.load('%s/test.%08d.y.npy' % (self.get_temp_dir(), 0))
+    self.assertAllEqual(read_x, [[1, 2], [3, 4]])
+    self.assertAllEqual(read_y, [10] * 4)
 
   def testGetShape(self):
     a = tf.constant([1])
@@ -323,7 +365,7 @@ class PyUtilsTest(tf.test.TestCase):
 
   def testCreateLocalTheta(self):
     methods = [py_utils.WeightInit.Gaussian, py_utils.WeightInit.Uniform]
-    dtypes = [tf.float32]
+    dtypes = [tf.float32, tf.complex64]
     shapes = [[2, 4], [3]]
 
     test_vars = py_utils.NestedMap()
@@ -364,6 +406,71 @@ class PyUtilsTest(tf.test.TestCase):
       self.assertEqual([_[0] for _ in var_grads.FlattenItems()], ['a'])
       self.assertEqual(var_grads.a[0].name, 'a:0')
 
+  def testMaskGradient(self):
+    with self.session(use_gpu=False) as sess:
+      a = tf.get_variable('a', [])
+      b = tf.get_variable('b', [])
+      c = tf.get_variable('c', [])
+      d = tf.get_variable('d', [])
+      e = tf.get_variable('e', [])
+      l = a + b + c + d
+      zeros = tf.zeros(3, dtype=tf.float32)
+      select = tf.one_hot(1, 3, dtype=tf.float32)
+      vmap = py_utils.NestedMap(
+          a=a, b=b, c=c, d=d, n=py_utils.NestedMap(aa=a, e=e))
+      grad_mask = py_utils.NestedMap()
+      grad_mask['a:0'] = zeros
+      grad_mask['b:0'] = zeros
+      grad_mask['c:0'] = select
+      grad_mask['d:0'] = select
+      grad_onehot = tf.one_hot(1, 3, dtype=tf.float32)
+      var_grads = py_utils.ComputeGradients(l, vmap)
+      var_grads_mask = py_utils.MaskGradients(var_grads, grad_mask, grad_onehot)
+      sess.run(tf.global_variables_initializer())
+      _, var_grads_mask_vals = sess.run([var_grads, var_grads_mask])
+      # 'a' and 'b' are masked, while 'c' and 'd' are not.
+      self.assertEqual(var_grads_mask_vals['a'][1], 0)
+      self.assertEqual(var_grads_mask_vals['b'][1], 0)
+      self.assertEqual(var_grads_mask_vals['c'][1], 1)
+      self.assertEqual(var_grads_mask_vals['d'][1], 1)
+
+  def testSkipL2Regularization(self):
+    with self.session(use_gpu=False) as sess:
+      beta = tf.get_variable(
+          'beta',
+          initializer=tf.constant(np.arange(10).reshape([1, 10]), tf.float32))
+      tf.add_to_collection(py_utils.SKIP_LP_REGULARIZATION, beta)
+      gamma = tf.get_variable(
+          'gamma',
+          initializer=tf.constant(np.arange(10).reshape([1, 10]), tf.float32))
+      act = tf.constant(np.arange(10).reshape([1, 10]), tf.float32)
+      pred = act * gamma + beta
+      loss = tf.reduce_sum(pred)
+      vmap = py_utils.NestedMap(beta=beta, gamma=gamma)
+      var_grads = py_utils.ComputeGradients(loss, vmap)
+      self.assertEqual(sorted(var_grads.keys()), ['beta', 'gamma'])
+      l2_loss, var_grads_with_l2 = py_utils.AdjustGradientsWithLpLoss(
+          var_grads, 0.1, p=2.0)
+
+      sess.run(tf.global_variables_initializer())
+      var_grads_vals, l2_loss_val, var_grads_with_l2_vals = sess.run(
+          [var_grads, l2_loss, var_grads_with_l2])
+      print('var_grads_vals = ', var_grads_vals)
+      print('var_grads_with_l2_vals = ', var_grads_with_l2_vals)
+      self.assertAllEqual(var_grads_vals.beta[0],
+                          var_grads_with_l2_vals.beta[0])
+      self.assertAllEqual(var_grads_vals.gamma[0],
+                          var_grads_with_l2_vals.gamma[0])
+      self.assertAllEqual(
+          l2_loss_val, 0.5 * 0.1 * np.sum(np.square(var_grads_vals.gamma[0])))
+
+      # With l2, gradients of be gamma are adjusted.
+      self.assertAllClose(
+          var_grads_with_l2_vals.gamma[1],
+          var_grads_vals.gamma[1] + 0.1 * var_grads_vals.gamma[0])
+      self.assertAllClose(var_grads_with_l2_vals.beta[1],
+                          var_grads_vals.beta[1])
+
   def testAdjustGradientsWithL2Loss(self):
     with self.session(use_gpu=False) as sess:
       emb = tf.get_variable(
@@ -378,8 +485,8 @@ class PyUtilsTest(tf.test.TestCase):
       vmap = py_utils.NestedMap(emb=emb, weight=weight, bias=bias)
       var_grads = py_utils.ComputeGradients(loss, vmap)
       self.assertEqual(sorted(var_grads.keys()), ['emb', 'weight'])
-      l2_loss, var_grads_with_l2 = py_utils.AdjustGradientsWithL2Loss(
-          var_grads, 0.1)
+      l2_loss, var_grads_with_l2 = py_utils.AdjustGradientsWithLpLoss(
+          var_grads, 0.1, p=2.0)
 
       sess.run(tf.global_variables_initializer())
       var_grads_vals, l2_loss_val, var_grads_with_l2_vals = sess.run(
@@ -408,6 +515,120 @@ class PyUtilsTest(tf.test.TestCase):
           0.1 * np.array([[1 / 3.], [1 / 2.], [1 / 3.], [1 / 3.], [1 / 2.]
                          ]) * var_grads_vals.emb[0][[2, 5, 2, 2, 5], :])
 
+  def testSkipL1Regularization(self):
+    with self.session(use_gpu=False) as sess:
+      beta = tf.get_variable(
+          'beta',
+          initializer=tf.constant(np.arange(10).reshape([1, 10]), tf.float32))
+      tf.add_to_collection(py_utils.SKIP_LP_REGULARIZATION, beta)
+      gamma = tf.get_variable(
+          'gamma',
+          initializer=tf.constant(np.arange(10).reshape([1, 10]), tf.float32))
+      act = tf.constant(np.arange(10).reshape([1, 10]), tf.float32)
+      pred = act * gamma + beta
+      loss = tf.reduce_sum(pred)
+      vmap = py_utils.NestedMap(beta=beta, gamma=gamma)
+      var_grads = py_utils.ComputeGradients(loss, vmap)
+      self.assertEqual(sorted(var_grads.keys()), ['beta', 'gamma'])
+      l1_loss, var_grads_with_l1 = py_utils.AdjustGradientsWithLpLoss(
+          var_grads, 0.1, p=1.0)
+
+      sess.run(tf.global_variables_initializer())
+      var_grads_vals, l1_loss_val, var_grads_with_l1_vals = sess.run(
+          [var_grads, l1_loss, var_grads_with_l1])
+      print('var_grads_vals = ', var_grads_vals)
+      print('var_grads_with_l1_vals = ', var_grads_with_l1_vals)
+      self.assertAllEqual(var_grads_vals.beta[0],
+                          var_grads_with_l1_vals.beta[0])
+      self.assertAllEqual(var_grads_vals.gamma[0],
+                          var_grads_with_l1_vals.gamma[0])
+      self.assertAllEqual(l1_loss_val,
+                          0.1 * np.sum(np.abs(var_grads_vals.gamma[0])))
+
+  def testAdjustGradientsWithL1Loss(self):
+    with self.session(use_gpu=False) as sess:
+      emb = tf.get_variable(
+          'emb',
+          initializer=tf.constant(np.arange(100).reshape([10, 10]), tf.float32))
+      act = tf.gather(emb, [2, 5, 2, 2, 5])
+      weight = tf.get_variable(
+          'w', initializer=tf.constant(np.ones([10, 1]), tf.float32))
+      bias = tf.get_variable('b', initializer=tf.constant([0.217]))
+      pred = tf.matmul(act, weight) + tf.stop_gradient(bias)
+      loss = tf.reduce_sum(pred)
+      vmap = py_utils.NestedMap(emb=emb, weight=weight, bias=bias)
+      var_grads = py_utils.ComputeGradients(loss, vmap)
+      self.assertEqual(sorted(var_grads.keys()), ['emb', 'weight'])
+      l1_loss, var_grads_with_l1 = py_utils.AdjustGradientsWithLpLoss(
+          var_grads, 0.1, p=1.0)
+
+      sess.run(tf.global_variables_initializer())
+      var_grads_vals, l1_loss_val, var_grads_with_l1_vals = sess.run(
+          [var_grads, l1_loss, var_grads_with_l1])
+      print('var_grads_vals = ', var_grads_vals)
+      print('var_grads_with_l1_vals = ', var_grads_with_l1_vals)
+      self.assertAllEqual(var_grads_vals.emb[0], var_grads_with_l1_vals.emb[0])
+      self.assertAllEqual(var_grads_vals.weight[0],
+                          var_grads_with_l1_vals.weight[0])
+      self.assertAllEqual(
+          l1_loss_val, 0.1 * (np.sum(np.abs(var_grads_vals.weight[0])) + np.sum(
+              np.abs(var_grads_vals.emb[0][2, :])) + np.sum(
+                  np.abs(var_grads_vals.emb[0][5, :]))))
+
+      # With l1, gradients of emb and weight are adjusted.
+      self.assertAllClose(
+          var_grads_with_l1_vals.weight[1],
+          var_grads_vals.weight[1] + 0.1 * var_grads_vals.weight[0])
+      self.assertAllClose(var_grads_with_l1_vals.emb[1].indices,
+                          var_grads_vals.emb[1].indices)
+
+  def testSplitAndConcat(self):
+    with self.session():
+      # Split a Tensor.
+      m3x4 = tf.constant(np.arange(12).reshape([3, 4]))
+      splits = py_utils.SplitRecursively(m3x4, 2)
+      self.assertEqual(2, len(splits))
+      for split in splits:
+        self.assertIsInstance(split, tf.Tensor)
+      self.assertAllClose([[0, 1], [4, 5], [8, 9]], splits[0].eval())
+      self.assertAllClose([[2, 3], [6, 7], [10, 11]], splits[1].eval())
+      concatenated = py_utils.ConcatRecursively(splits)
+      self.assertAllClose(m3x4.eval(), concatenated.eval())
+
+      # Split along axis 0.
+      splits = py_utils.SplitRecursively(m3x4, 3, axis=0)
+      self.assertEqual(3, len(splits))
+      concatenated = py_utils.ConcatRecursively(splits, axis=0)
+      self.assertAllClose(m3x4.eval(), concatenated.eval())
+      self.assertAllClose([[0, 1, 2, 3]], splits[0].eval())
+
+      # Split a list.
+      list_3 = [m3x4] * 3
+      splits = py_utils.SplitRecursively(list_3, 2)
+      for split in splits:
+        self.assertIsInstance(split, list)
+      for x in splits[0]:
+        self.assertAllClose([[0, 1], [4, 5], [8, 9]], x.eval())
+      for x in splits[1]:
+        self.assertAllClose([[2, 3], [6, 7], [10, 11]], x.eval())
+      concatenated = py_utils.ConcatRecursively(splits)
+      self.assertAllClose([x.eval() for x in list_3],
+                          [x.eval() for x in concatenated])
+
+      # Split a NestedMap.
+      map_ab = py_utils.NestedMap(a=m3x4, b=list_3)
+      splits = py_utils.SplitRecursively(map_ab, 2)
+      for split in splits:
+        self.assertIsInstance(split, py_utils.NestedMap)
+        self.assertIsInstance(split.a, tf.Tensor)
+        self.assertIsInstance(split.b, list)
+      for x in splits[0].b:
+        self.assertAllClose([[0, 1], [4, 5], [8, 9]], x.eval())
+      concatenated = py_utils.ConcatRecursively(splits)
+      self.assertAllClose(map_ab.a.eval(), concatenated.a.eval())
+      self.assertAllClose([x.eval() for x in map_ab.b],
+                          [x.eval() for x in concatenated.b])
+
   def testFindNeeded(self):
     phs = [
         tf.placeholder('float32', shape=(), name='p%d' % (i + 1,))
@@ -426,26 +647,27 @@ class PyUtilsTest(tf.test.TestCase):
     self.assertTrue(set([p1, p2, p3]) == z2_needed)
     self.assertTrue(set([p1, p2, p3, p4]) == z2_p4_needed)
 
-  def testStatsCounter(self):
-    with self.session() as sess:
-      foo = py_utils.StatsCounter('foo')
-      val = foo.Value()
-      params = base_layer.LayerBase.Params()
-      inc = foo.IncBy(params, 100)
-
-      tf.global_variables_initializer().run()
-      self.assertAllEqual(0, val.eval())
-      self.assertAllEqual(100, sess.run(inc))
-      self.assertAllEqual(100, val.eval())
-      self.assertAllEqual([100, 200], sess.run([val, inc]))
-      self.assertAllEqual([200, 300], sess.run([val, inc]))
-
   def testModelSplit(self):
     with py_utils.ModelSplit(2):
       assert py_utils.GetModelSplit() == 2
       with py_utils.ModelSplit(3):
         assert py_utils.GetModelSplit() == 3
     assert py_utils.GetModelSplit() == 0
+
+  def testArgMax(self):
+
+    def Compute(x):
+      with self.session(graph=tf.Graph()) as sess:
+        x = tf.constant(x)
+        y = py_utils.ArgMax(x)
+        return sess.run([x, y])
+
+    np.random.seed(426421)
+    x, y = Compute(np.random.uniform(size=(3, 5, 10)))
+    self.assertAllEqual(np.argmax(x, axis=-1), y)
+
+    x, y = Compute(np.array([[1, 5, 3, 4, 5], [1, 5, 3, 5, 0]]))  # Has dups.
+    self.assertAllEqual(np.argmax(x, axis=-1), y)
 
   def testPiecewiseConstant(self):
     boundaries = (1000, 2000, 3000)
@@ -464,6 +686,29 @@ class PyUtilsTest(tf.test.TestCase):
     self.assertAlmostEqual(3e-5, _Eval(3000))
     self.assertAlmostEqual(4e-6, _Eval(4000))
 
+  def testRepeatDim(self):
+    # Create a tensor shaped [time (2), batch(2), depth(3)]
+    x = tf.constant([[[1, 2, 3], [4, 5, 6]], [[7, 8, 9], [10, 11, 12]]])
+    # [batch, time, depth]
+    y = tf.transpose(x, [1, 0, 2])
+    # [depth, batch, time]
+    z = tf.transpose(x, [2, 1, 0])
+    repeat_inner_dim0 = py_utils.RepeatDim(x, 2, 0)
+    repeat_inner_dim1 = py_utils.RepeatDim(y, 2, 1)
+    repeat_inner_dim2 = py_utils.RepeatDim(z, 2, 2)
+
+    with self.session(use_gpu=False) as sess:
+      [repeat_inner_dim0, repeat_inner_dim1, repeat_inner_dim2] = sess.run(
+          [repeat_inner_dim0, repeat_inner_dim1, repeat_inner_dim2])
+      self.assertAllEqual(
+          repeat_inner_dim0,
+          [[[1, 2, 3], [4, 5, 6]], [[1, 2, 3], [4, 5, 6]],
+           [[7, 8, 9], [10, 11, 12]], [[7, 8, 9], [10, 11, 12]]])
+      repeat_inner_dim = np.transpose(repeat_inner_dim0, [1, 0, 2])
+      self.assertAllEqual(repeat_inner_dim1, repeat_inner_dim)
+      repeat_inner_dim = np.transpose(repeat_inner_dim0, [2, 1, 0])
+      self.assertAllEqual(repeat_inner_dim2, repeat_inner_dim)
+
   def testStackTensorsRecursively(self):
     with self.session(use_gpu=False, graph=tf.Graph()):
       stacked = py_utils.StackTensorsRecursively([
@@ -481,6 +726,25 @@ class PyUtilsTest(tf.test.TestCase):
       tf.global_variables_initializer().run()
       self.assertAllEqual(stacked.x, tf.constant([[1, 2], [3, 4]]))
       self.assertAllEqual(stacked.z.a, tf.constant([[1, 2], [10, 20]]))
+
+
+class DeterministicDropoutTest(tf.test.TestCase):
+
+  def testDeterministicDropoutTest(self):
+    x = tf.ones([4, 6], dtype=tf.float32)
+    x = py_utils.DeterministicDropout(x, keep_prob=0.7, seeds=[1234, 5678])
+    with self.session() as sess:
+      x_val = sess.run(x)
+      # pyformat: disable
+      self.assertAllClose(
+          [[1.0 / 0.7, 0.0000000, 0.0000000, 0.0000000, 1.0 / 0.7, 1.0 / 0.7],
+           [1.0 / 0.7, 1.0 / 0.7, 1.0 / 0.7, 1.0 / 0.7, 1.0 / 0.7, 1.0 / 0.7],
+           [1.0 / 0.7, 0.0000000, 0.0000000, 1.0 / 0.7, 1.0 / 0.7, 0.0000000],
+           [1.0 / 0.7, 0.0000000, 0.0000000, 1.0 / 0.7, 1.0 / 0.7, 1.0 / 0.7]],
+          x_val)
+      # pyformat: enable
+      self.assertAllClose(22.85714, np.sum(x_val))
+      self.assertEqual(x_val.dtype, np.float32)
 
 
 class WeightedAvgTest(tf.test.TestCase):
@@ -758,26 +1022,133 @@ class ReadOnlyAttrDictViewTest(tf.test.TestCase):
     self.assertEquals(1, view['test'])
 
 
+class PadSequenceDimensionTest(tf.test.TestCase):
+
+  def testPadSequenceDimension_2D(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      x = tf.random_normal(shape=(3, 3), seed=123456)
+      length = 6
+      padded_x = py_utils.PadSequenceDimension(x, length, 0)
+      self.assertEqual(padded_x.shape.as_list(), [3, 6])
+      real_x = sess.run(padded_x)
+      # pyformat: disable
+      expected_x = [[0.38615, 2.975221, -0.852826, 0., 0., 0.],
+                    [-0.571142, -0.432439, 0.413158, 0., 0., 0.],
+                    [0.255314, -0.985647, 1.461641, 0., 0., 0.]]
+      # pyformat: enable
+      self.assertAllClose(expected_x, real_x)
+
+  def testPadSequenceDimension_2D_UnknownShape(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      shape = tf.placeholder(tf.int32)
+      x = tf.random_normal(shape=shape, seed=123456)
+      length = 6
+      padded_x = py_utils.PadSequenceDimension(x, length, 0)
+      self.assertEqual(padded_x.shape, None)
+      real_x = sess.run(padded_x, feed_dict={shape: [3, 3]})
+      # pyformat: disable
+      expected_x = [[0.38615, 2.975221, -0.852826, 0., 0., 0.],
+                    [-0.571142, -0.432439, 0.413158, 0., 0., 0.],
+                    [0.255314, -0.985647, 1.461641, 0., 0., 0.]]
+      # pyformat: enable
+      self.assertAllClose(expected_x, real_x)
+
+  def testPadSequenceDimension_ShortPaddingLength(self):
+    x = tf.random_normal(shape=(3, 8), seed=123456)
+    length = 6
+    with self.assertRaisesRegexp(ValueError, 'Paddings must be non-negative'):
+      py_utils.PadSequenceDimension(x, length, 0)
+
+  def testPadSequenceDimension_4D(self):
+    with self.session(use_gpu=False, graph=tf.Graph()) as sess:
+      x = tf.random_normal(shape=(2, 2, 2, 2), seed=123456)
+      length = 4
+      padded_x = py_utils.PadSequenceDimension(x, length, 1)
+      real_x = sess.run(padded_x)
+      # pyformat: disable
+      expected_x = [[[[0.38614973, 2.97522092], [-0.85282576, -0.57114178]],
+                     [[-0.43243945, 0.41315758], [0.2553139, -0.98564667]],
+                     [[1., 1.], [1., 1.]],
+                     [[1., 1.], [1., 1.]]],
+                    [[[1.46164131, 0.12003655], [-0.0986772, 0.60644895]],
+                     [[0.03092973, -0.96897006], [-1.27853918, -0.44018385]],
+                     [[1., 1.], [1., 1.]],
+                     [[1., 1.], [1., 1.]]]]
+      # pyformat: enable
+      self.assertAllClose(expected_x, real_x)
+
+  def testPadSequenceDimension_UnmatchedShape(self):
+    with self.session(use_gpu=False, graph=tf.Graph()):
+      x = tf.random_normal(shape=(2, 2, 2, 2), seed=123456)
+      length = 4
+      self.assertRaises(ValueError, py_utils.PadSequenceDimension, x, length, 0,
+                        (32, 3, 4, 5))
+
+
 class ApplyPaddingTest(tf.test.TestCase):
 
   def testApplyPaddingToZeroWithBroadcast(self):
     with self.session():
-      y = py_utils.ApplyPadding([[0.0], [1.0], [0.0]],
-                                [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]).eval()
+      y = py_utils.ApplyPadding(
+          tf.convert_to_tensor([[0.0], [1.0], [0.0]]),
+          tf.convert_to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])).eval()
       self.assertAllClose(y, [[1.0, 2.0], [0.0, 0.0], [5.0, 6.0]])
 
   def testApplyPaddingToConstWithBroadcast(self):
     with self.session():
-      y = py_utils.ApplyPadding([[0.0], [1.0], [0.0]],
-                                [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
-                                [[1.0, 2.0], [9.0, 10.0], [5.0, 6.0]]).eval()
+      y = py_utils.ApplyPadding(
+          tf.convert_to_tensor([[0.0], [1.0], [0.0]]),
+          tf.convert_to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]),
+          tf.convert_to_tensor([[1.0, 2.0], [9.0, 10.0], [5.0, 6.0]])).eval()
       self.assertAllClose(y, [[1.0, 2.0], [9.0, 10.0], [5.0, 6.0]])
 
   def testApplyPaddingToZeroWithoutBroadcast(self):
     with self.session():
-      y = py_utils.ApplyPadding([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
-                                [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]).eval()
+      y = py_utils.ApplyPadding(
+          tf.convert_to_tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+          tf.convert_to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])).eval()
       self.assertAllClose(y, [[1.0, 2.0], [0.0, 4.0], [5.0, 0.0]])
+
+
+class ReversePaddedSequenceTest(tf.test.TestCase):
+
+  def testReversePaddedSequence(self):
+    with self.session(use_gpu=False):
+      # inputs is [seq_length, batch_size, input_dim] = [4, 3, 2]
+      # The length of each batch is [2, 3, 4]
+      inputs = tf.constant(
+          [[[1, 2], [3, 4], [5, 6]], [[11, 12], [13, 14], [15, 16]],
+           [[0, 0], [23, 24], [25, 26]], [[0, 0], [0, 0], [35, 36]]],
+          dtype=tf.float32)
+      paddings = tf.constant(
+          [[[0], [0], [0]], [[0], [0], [0]], [[1], [0], [0]], [[1], [1], [0]]],
+          dtype=tf.float32)
+      actual_output = py_utils.ReversePaddedSequence(inputs, paddings).eval()
+      expected_output = np.array([[[11, 12], [23, 24], [35, 36]],
+                                  [[1, 2], [13, 14], [25, 26]],
+                                  [[0, 0], [3, 4], [15, 16]],
+                                  [[0, 0], [0, 0], [5, 6]]]).astype('float32')
+      self.assertAllClose(expected_output, actual_output)
+
+
+class RetryTest(tf.test.TestCase):
+
+  def testRetry(self):
+    max_retries = 20
+
+    @py_utils.Retry(max_retries=max_retries)
+    def Foo(state):
+      tf.logging.error('foo retried %s', state)
+      state['count'] += 1
+      raise ValueError('test')
+
+    try:
+      state = {'count': 0, 'msg': 'test'}
+      Foo(state)
+    except Exception as e:  # pylint: disable=broad-except
+      tf.logging.error('%s', e)
+
+    self.assertEqual(1 + max_retries, state['count'])
 
 
 class MixByWeightTest(tf.test.TestCase):
@@ -790,19 +1161,72 @@ class MixByWeightTest(tf.test.TestCase):
       sess.run(tf.global_variables_initializer())
 
       def _AddFn(var):
+        return lambda: tf.assign_add(var, 1)
 
-        def _Fn():
-          return tf.assign_add(var, 1)
-
-        return _Fn
-
-      op = py_utils.MixByWeight([(_AddFn(var_a), 0.7), (_AddFn(var_b), 0.3)])
+      op, _ = py_utils.MixByWeight([_AddFn(var_a), _AddFn(var_b)], [0.7, 0.3])
       for _ in range(100):
         sess.run(op)
       a, b = sess.run([var_a, var_b])
       self.assertEqual(100, a + b)
       self.assertGreater(a, 50)
       self.assertLess(b, 50)
+
+  def testMixByWeightWithDynamicWeights(self):
+    var_a = tf.get_variable('a', trainable=False, initializer=0)
+    var_b = tf.get_variable('b', trainable=False, initializer=0)
+    var_w = tf.get_variable('w', trainable=False, dtype=tf.float32, shape=[2])
+
+    with self.session() as sess:
+      sess.run(tf.global_variables_initializer())
+
+      def _AddFn(var):
+        return lambda: tf.assign_add(var, 1)
+
+      op, _ = py_utils.MixByWeight([_AddFn(var_a), _AddFn(var_b)], var_w)
+
+      # all weight goes to 'a'
+      sess.run([tf.assign(var_w, [1.0, 0.0])])
+      for _ in range(10):
+        sess.run(op)
+      a, b = sess.run([var_a, var_b])
+      self.assertEqual(10, a)
+      self.assertEqual(0, b)
+
+      # all weight goes to 'b'
+      sess.run([tf.assign(var_w, [0.0, 1.0])])
+      for _ in range(10):
+        sess.run(op)
+      a, b = sess.run([var_a, var_b])
+      self.assertEqual(10, a)
+      self.assertEqual(10, b)
+
+  def testMixByWeightAndBpropType(self):
+    var_a = tf.get_variable('a', trainable=False, initializer=0)
+    var_b = tf.get_variable('b', trainable=False, initializer=0)
+
+    with self.session() as sess:
+      sess.run(tf.global_variables_initializer())
+
+      def _AddFn(var):
+        return lambda: tf.assign_add(var, 1)
+
+      op, bprop = py_utils.MixByWeight(
+          [_AddFn(var_a), _AddFn(var_b)], [1.0, 0.0])
+      for _ in range(10):
+        sess.run(op)
+      bprop_v, a, b = sess.run([bprop, var_a, var_b])
+      self.assertEqual(10, a)
+      self.assertEqual(0, b)
+      self.assertAllClose(np.array([1, 0]), np.squeeze(bprop_v))
+
+      op, bprop = py_utils.MixByWeight(
+          [_AddFn(var_a), _AddFn(var_b)], [0.0, 1.0])
+      for _ in range(10):
+        sess.run(op)
+      bprop_v, a, b = sess.run([bprop, var_a, var_b])
+      self.assertEqual(10, a)
+      self.assertEqual(10, b)
+      self.assertAllClose(np.array([0, 1]), np.squeeze(bprop_v))
 
 
 if __name__ == '__main__':

@@ -65,9 +65,9 @@ lingvo_cc_library(
 )
 
 lingvo_cc_library(
-    name = "simple_tokenizer",
-    srcs = ["simple_tokenizer.cc"],
-    hdrs = ["simple_tokenizer.h"],
+    name = "ascii_tokenizer",
+    srcs = ["ascii_tokenizer.cc"],
+    hdrs = ["ascii_tokenizer.h"],
 )
 
 lingvo_cc_library(
@@ -172,6 +172,9 @@ custom_kernel_library(
     name = "best_step_op_kernels",
     srcs = ["best_step_op_kernels.cc"],
     op_def_lib = [":x_ops"],
+    deps = [
+        # Implicit tensorflow proto dependency.
+    ],
 )
 
 py_test(
@@ -204,7 +207,7 @@ py_test(
         # Implicit numpy dependency.
         # Implicit six dependency.
         # Implicit tensorflow dependency.
-        # Implicit tensorflow python framework_for_generated_wrappers dependency.,
+        # Implicit tensorflow python framework_for_generated_wrappers dependency.
     ],
 )
 
@@ -245,12 +248,18 @@ py_test(
     ],
 )
 
+lingvo_cc_library(
+    name = "tokenizer_op_headers",
+    hdrs = ["tokenizer_op_headers.h"],
+)
+
 custom_kernel_library(
     name = "tokenizer_ops_kernels",
     srcs = ["tokenizer_ops_kernels.cc"],
+    hdrs = ["tokenizer_op_headers.h"],
     op_def_lib = [":x_ops"],
     deps = [
-        ":simple_tokenizer",
+        ":ascii_tokenizer",
         ":simple_vocab",
     ],
 )
@@ -259,6 +268,8 @@ py_test(
     name = "tokenizer_ops_test",
     srcs = ["tokenizer_ops_test.py"],
     data = [
+        "//lingvo/core/ops/testdata:bpe_codes_vocab",
+        "//lingvo/core/ops/testdata:bpe_words_vocab",
         "//lingvo/core/ops/testdata:test_ngrams",
         "//lingvo/core/ops/testdata:test_vocab",
     ],
@@ -269,12 +280,13 @@ py_test(
     ],
 )
 
-lingvo_proto_py(
-    name = "hyps_py_pb2",
-    src = "hyps.proto",
-)
-
 lingvo_proto_cc(
     name = "hyps_proto",
     src = "hyps.proto",
+)
+
+lingvo_proto_py(
+    name = "hyps_py_pb2",
+    src = "hyps.proto",
+    deps = [":hyps_proto"],
 )

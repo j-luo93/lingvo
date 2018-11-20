@@ -35,11 +35,10 @@ struct Hyp {
   float local_score;            // Local score from the current step.
   float global_score;           // Cumulative score till the current step.
   std::vector<int32> prev_ids;  // The (non-epsilon) token ids up to this step.
-  float lm_local_score;         // Local LM score;
 
   string DebugString() const {
     return strings::StrCat(beam_id, " ", hyp_id, " ", word_id, " ", local_score,
-                           " ", global_score, " ", lm_local_score);
+                           " ", global_score);
   }
 };
 
@@ -122,38 +121,6 @@ struct InsertHypWithEpsilonDedupe {
   const HigherScore better_hyp;
 };
 
-// Returns true if 'cur_hyp' ad 'other_hyp' represent the same label sequence
-// when epsilons are ignored, and false otherwise.
-bool IsDuplicateHypothesis(const Hypothesis& cur_hyp,
-                           const Hypothesis& other_hyp, const int epsilon_id);
-
-// An insertion operator that first checks whether 'hyp'  is a duplicate of any
-// hyp already in 'items'.  If so, these two hyps are merged.
-// This check is only performed if we are using a model that emits epsilons
-// (NT or RNN-T).
-struct InsertHypothesisWithEpsilonDedupe {
-  explicit InsertHypothesisWithEpsilonDedupe(int _epsilon_id)
-      : epsilon_id(_epsilon_id), better_hyp() {}
-  void operator()(const Hypothesis& hyp, std::vector<Hypothesis>* items) const {
-    if (epsilon_id < 0) {
-      items->push_back(hyp);
-      return;
-    }
-    for (int i = 0; i < items->size(); ++i) {
-      const Hypothesis& old_hyp = (*items)[i];
-      if (IsDuplicateHypothesis(hyp, old_hyp, epsilon_id)) {
-        Hypothesis combined_hyp = better_hyp(hyp, old_hyp) ? hyp : old_hyp;
-        combined_hyp.set_normalized_score(
-            LogSumExp(hyp.normalized_score(), old_hyp.normalized_score()));
-        (*items)[i] = combined_hyp;
-        return;
-      }
-    }
-    items->push_back(hyp);
-  }
-  int epsilon_id;
-  const BetterTerminatedHyp better_hyp;
-};
 
 // A helper class keeps track of top K highest ranked elements added.
 // Comp(x, y) returns true iff x is ranked higher than y.
@@ -228,11 +195,10 @@ void ComputeTopKPlusM(const std::vector<Hyp>& hyps, const Tensor& scores,
                       const int32 k, const int32 m, const int32 eos_id,
                       const int32 eoc_id, const int32 num_beams,
                       const float valid_eos_max_logit_delta,
-                      const float lm_weight, const Tensor& lm_log_probs,
                       bool is_first_step, const Tensor& is_last_chunk,
-                      bool merge_paths, std::vector<bool>* eos_in_topk,
-                      std::vector<Hyp>* top_k, std::vector<Hyp>* extra_m,
-                      std::vector<Hyp>* eos_hyps,
+                      bool merge_paths, bool allow_empty_terminated_hyp,
+                      std::vector<bool>* eos_in_topk, std::vector<Hyp>* top_k,
+                      std::vector<Hyp>* extra_m, std::vector<Hyp>* eos_hyps,
                       std::vector<int32>* terminal_symbol);
 
 }  // namespace lingvo

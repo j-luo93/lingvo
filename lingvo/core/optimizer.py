@@ -20,28 +20,20 @@ from __future__ import print_function
 
 import tensorflow as tf
 
+from lingvo.core import base_layer
 from lingvo.core import hyperparams
 from lingvo.core import py_utils
 from lingvo.core import summary_utils
 
 
-class Base(object):
+class Base(base_layer.BaseLayer):
   """Base class for all optimizers."""
 
   @classmethod
   def Params(cls):
-    """Returns the optimizer params."""
-    p = hyperparams.Params()
-    p.Define('cls', cls, 'Cls that this param object is associated with.')
-    p.Define('add_summary', True, 'Adds summary iff true.')
+    p = super(Base, cls).Params()
+    p.name = cls.__name__
     return p
-
-  @property
-  def params(self):
-    return self._params
-
-  def __init__(self, params):
-    self._params = params.Copy()
 
   def GetOptimizer(self, lr):
     """Returns the TF optimizer object."""
@@ -56,7 +48,7 @@ class Base(object):
 
     Args:
       lr: A scalar. The base learning rate.
-      var_grad: A NestedMap of (var, grad) pairs.
+      var_grad: A `.NestedMap` of (var, grad) pairs.
 
     Returns:
       The variable update op.
@@ -113,6 +105,28 @@ class Momentum(Base):
     summary_utils.scalar(self.params, 'momentum_lr', lr)
 
 
+class RMSProp(Base):
+  """RMSProp optimizer."""
+
+  @classmethod
+  def Params(cls):
+    p = super(RMSProp, cls).Params()
+    p.Define('decay', 0.9, 'Discounting factor for the history/coming gradient')
+    p.Define('momentum', 0.9, 'Momentum in RMSProp.')
+    p.Define(
+        'epsilon', 1.0,
+        'Epsilon term for RMSProp. Small value to avoid zero denominator.')
+    return p
+
+  def GetOptimizer(self, lr):
+    p = self.params
+    return tf.train.RMSPropOptimizer(
+        lr, p.decay, momentum=p.momentum, epsilon=p.epsilon)
+
+  def AddSummary(self, lr, optimizer, var_grad):
+    summary_utils.scalar(self.params, 'rmsprop_lr', lr)
+
+
 class Adagrad(Base):
   """Adagrad."""
 
@@ -147,6 +161,7 @@ class Adam(Base):
     p.Define('beta1', 0.9, 'Beta1 for Adam.')
     p.Define('beta2', 0.999, 'Beta2 for Adam.')
     p.Define('epsilon', 1e-6, 'Epsilon for Adam.')
+    p.name = 'Adam'
     return p
 
   @staticmethod
@@ -162,7 +177,11 @@ class Adam(Base):
   def GetOptimizer(self, lr):
     p = self.params
     return tf.train.AdamOptimizer(
-        learning_rate=lr, beta1=p.beta1, beta2=p.beta2, epsilon=p.epsilon)
+        learning_rate=lr,
+        beta1=p.beta1,
+        beta2=p.beta2,
+        epsilon=p.epsilon,
+        name=p.name)
 
   def AddSummary(self, lr, optimizer, var_grad):
     summary_utils.scalar(self.params, 'adam_lr', lr)
@@ -173,20 +192,19 @@ class Accumulator(Base):
 
   @classmethod
   def Params(cls):
-    params = super(Accumulator, cls).Params()
-    params.Define('dtype', tf.float32, 'Datatype to use.')
-    params.Define('optimizer_tpl', Adam.Params(),
-                  'Params for the wrapped optimizer.')
-    params.Define(
+    p = super(Accumulator, cls).Params()
+    p.Define('optimizer_tpl', Adam.Params(),
+             'Params for the wrapped optimizer.')
+    p.Define(
         'accum_steps', 5, 'Number of gradient accumulation steps'
         ' before invoking wrapped optimizer.')
-    return params
+    p.name = 'Accumulator'
+    return p
 
   def __init__(self, params):
     super(Accumulator, self).__init__(params)
     p = self.params
-    self._opt = p.optimizer_tpl.cls(
-        p.optimizer_tpl.Copy().Set(add_summary=p.add_summary))
+    self._opt = p.optimizer_tpl.cls(p.optimizer_tpl)
 
   def Apply(self, lr, var_grad):
     p = self.params

@@ -28,12 +28,9 @@ from tensorflow.core.framework import summary_pb2
 from tensorflow.core.protobuf import saver_pb2
 
 from lingvo import base_trial
-from lingvo import model_registry
 from lingvo.core import cluster_factory
 from lingvo.core import early_stop
 from lingvo.core import py_utils
-
-tf.flags.DEFINE_bool('add_summary', True, 'If True, adds summaries.')
 
 tf.flags.DEFINE_integer(
     'enqueue_max_steps', -1, 'Max enqueue steps. -1 meaning no limit.'
@@ -43,13 +40,6 @@ tf.flags.DEFINE_integer('saver_max_to_keep', 100,
                         'Maximum number of recent checkpoints to keep.')
 
 FLAGS = tf.flags.FLAGS
-
-# pyformat: disable
-# pylint: disable=invalid-name
-GetParams = model_registry.GetParams
-GetClass = model_registry.GetClass
-# pylint: enable=invalid-name
-# pyformat: enable
 
 
 class BaseRunner(object):
@@ -72,7 +62,6 @@ class BaseRunner(object):
       trial:   An optional hyperparameter trial. Used by Vizier studies.
     """
     p = params.Copy()
-    p.add_summary = FLAGS.add_summary
 
     self._params = trial.OverrideModelParams(p)
     tf.logging.info('=' * 60)
@@ -167,7 +156,7 @@ class BaseRunner(object):
 
   @py_utils.Retry()
   def _RunLoop(self, job_name, loop_func, *args):
-    """Runs 'loop_func', retrying on expected errors."""
+    """Runs `loop_func`, retrying on expected errors."""
     try:
       tf.logging.info('%s started.', job_name)
       loop_func(*args)
@@ -179,14 +168,14 @@ class BaseRunner(object):
       #   AbortedError: processes restarts.
       #   OutOfRangeError: Test/dev datasets are exhausted.
       self._SetStatusMessage(
-          '%s exception: %s\n' % (job_name, e), retrying=True)
+          '%s exception: %r\n' % (job_name, e), retrying=True)
       for msg in traceback.format_exc().split('\n'):
         tf.logging.error(msg)
       raise
     except Exception as e:  # pylint: disable=broad-except
       # Allow the job to die on errors that are unlikely to be transient,
       # e.g. caused by a mis-configured model.
-      self._SetStatusMessage('%s exception: %s\n' % (job_name, e))
+      self._SetStatusMessage('%s exception: %r\n' % (job_name, e))
       # Prints the error message line by line to avoid message cropping.
       msgv = traceback.format_exc().split('\n')
       for msg in msgv:
@@ -209,14 +198,45 @@ class BaseRunner(object):
         sess.run(self.initialize_tables)
       gsteps = self._model.global_step
       local_enqueue_steps = 0
+
+      # Avoid calling trial.ShouldStop too often as it can slow down the
+      # infeed queue by adding latency. last_should_stop_check_time tracks
+      # the last time we made the call, and rate limits below.
+      last_should_stop_check_time = 0
+
+      # Global enqueue steps measures how many global steps have data enqueued
+      # for already. We use this to terminate; note that the enqueue op may
+      # hang in session.run if we do not terminate with this check.
+      global_enqueue_steps = None
+
+      # Each session run to the tpu trainer makes tpu_steps_per_loop. We need
+      # to continue enqueueing beyond the max train steps since the tpu_steps
+      # in the loop may exceed the max train steps. adjust_steps makes an
+      # appropriate adjustment.
+      adjust_steps = (
+          self.params.train.tpu_steps_per_loop if py_utils.use_tpu() else 0)
+
       tf.logging.info('params.train.max_steps: %d, enqueue_max_steps: %d',
                       self.params.train.max_steps, FLAGS.enqueue_max_steps)
       while True:
         global_step, = sess.run([gsteps])
+        if global_enqueue_steps is None:
+          global_enqueue_steps = global_step
         if local_enqueue_steps % 1000 == 0:
-          tf.logging.info('Current local_enqueue_steps: %d, global_step: %d',
-                          local_enqueue_steps, global_step)
-        if self._trial.ShouldStop() or self._ShouldStop(sess, global_step):
+          tf.logging.info(
+              'Current global_enqueue_steps: %d, '
+              'local_enqueue_steps: %d, global_step: %d', global_enqueue_steps,
+              local_enqueue_steps, global_step)
+
+        # Check trial.ShouldStop only every 10 seconds
+        trial_should_stop = False
+        if time.time() > last_should_stop_check_time + 10:
+          trial_should_stop = self._trial.ShouldStop()
+          last_should_stop_check_time = time.time()
+
+        if (trial_should_stop or
+            self._ShouldStop(sess, global_enqueue_steps - adjust_steps) or
+            self._ShouldStop(sess, global_step)):
           tf.logging.info('Done. Params.train.max_steps reached.')
           return
         if (FLAGS.enqueue_max_steps > 0 and
@@ -224,6 +244,11 @@ class BaseRunner(object):
           tf.logging.info('Done. FLAGS.enqueue_max_steps reached.')
           return
         local_enqueue_steps += 1
+
+        # There are tpu_infeed_parallism parallel threads enqueuing.
+        # We account for all of them when updating global_enqueue_steps.
+        global_enqueue_steps += self.params.input.tpu_infeed_parallism
+
         sess.run([op])
 
   def _GetSession(self, **kwargs):
@@ -254,11 +279,11 @@ class BaseRunner(object):
       summary_writer: The summary writer to use.
       job_name: The name of the job that tries to write this summary.
       global_step: The checkpoint used for eval is generated at this step.
-      summaries: a dict from keys to tf.Summary protobuf messages.
+      summaries: a dict from keys to `tf.Summary` protobuf messages.
       text_filename: If not None, writes the summary to the text file.
     """
     status_metrics = []
-    for name, summary in summaries.items():
+    for name, summary in sorted(summaries.items()):
       if not isinstance(summary, summary_pb2.Summary):
         tf.logging.warning(
             'Non tf.Summary args passed to _WriteSummaries, skipping: %s @%s',
@@ -276,7 +301,6 @@ class BaseRunner(object):
         tf.logging.info('%s summary on checkpoint@%d %s', job_name, global_step,
                         name)
     summary_writer.flush()
-    status_metrics = sorted(status_metrics)
     self._SetStatusMessage(
         '%s: step:%6d, %s' % (job_name, global_step, ', '.join(status_metrics)))
     if text_filename is not None:

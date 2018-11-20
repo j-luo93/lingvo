@@ -35,13 +35,6 @@ from lingvo.core import rnn_cell
 from lingvo.core import rnn_layers
 from lingvo.core import test_utils
 
-FLAGS = tf.flags.FLAGS
-
-# pylint: disable=invalid-name
-ComputeNumericGradient = test_utils.ComputeNumericGradient
-# pylint: enable=invalid-name
-assert_shape_match = py_utils.assert_shape_match
-
 
 class TimestepAccumulator(base_layer.Accumulator):
   """Simple accumulator for counting timesteps."""
@@ -71,7 +64,8 @@ class LayersTestBase(tf.test.TestCase):
                              cls,
                              dtype,
                              trailing_pad_len=0,
-                             keep_prob=1.0):
+                             keep_prob=1.0,
+                             bi_directional=False):
     tf.set_random_seed(123456)
     batch = 3
     dims = 16
@@ -89,16 +83,16 @@ class LayersTestBase(tf.test.TestCase):
         params.vn.seed = 2938482
         params.vn.scale = 0.1
         params.num_input_nodes = dims
-        params.num_output_nodes = dims
+        params.num_output_nodes = dims // 2 if bi_directional else dims
 
         sfrnn_params = cls.Params()
         sfrnn_params.name = 'sfrnn'
         sfrnn_params.dtype = dtype
+        sfrnn_params.random_seed = 123456
         sfrnn_params.cell_tpl = params
         sfrnn_params.num_layers = num_layers
         sfrnn_params.skip_start = 2
         sfrnn_params.dropout.keep_prob = keep_prob
-        sfrnn_params.dropout.seed = 123456
         with tf.name_scope('sfrnn'):
           sfrnn = sfrnn_params.cls(sfrnn_params)
 
@@ -110,12 +104,15 @@ class LayersTestBase(tf.test.TestCase):
           paddings[-trailing_pad_len - 3:-trailing_pad_len - 1, :] = 1.0
         paddings = tf.constant(paddings, dtype)
 
-        sfrnn_outputs, sfrnn_final = sfrnn.FPropDefaultTheta(inputs, paddings)
-
         tf.global_variables_initializer().run()
-        return sess.run([sfrnn_outputs, sfrnn_final])
+        if bi_directional:
+          sfrnn_outputs = sfrnn.FPropFullSequence(sfrnn.theta, inputs, paddings)
+          return sess.run(sfrnn_outputs)
+        else:
+          sfrnn_outputs, sfrnn_final = sfrnn.FPropDefaultTheta(inputs, paddings)
+          return sess.run([sfrnn_outputs, sfrnn_final])
 
-  def _testStackedFRNNGradHelper(self, cls):
+  def _testStackedFRNNGradHelper(self, cls, bi_directional=False):
     trailing_pad_len = 2
     dtype = tf.float64
     batch = 3
@@ -133,7 +130,7 @@ class LayersTestBase(tf.test.TestCase):
       params.vn.seed = 2938482
       params.vn.scale = 0.1
       params.num_input_nodes = dims
-      params.num_output_nodes = dims
+      params.num_output_nodes = dims // 2 if bi_directional else dims
 
       sfrnn_params = cls.Params()
       sfrnn_params.name = 'sfrnn'
@@ -151,11 +148,14 @@ class LayersTestBase(tf.test.TestCase):
       paddings[-trailing_pad_len - 3:-trailing_pad_len - 1, :] = 1.0
       paddings = tf.constant(paddings, dtype)
 
-      sfrnn_outputs, sfrnn_final = sfrnn.FPropDefaultTheta(inputs, paddings)
-
-      loss = tf.reduce_sum(sfrnn_outputs)
-      for fin in sfrnn_final.rnn:
-        loss += tf.reduce_sum(fin.m) + tf.reduce_sum(fin.c)
+      if bi_directional:
+        sfrnn_outputs = sfrnn.FPropDefaultTheta(inputs, paddings)
+        loss = tf.reduce_sum(sfrnn_outputs)
+      else:
+        sfrnn_outputs, sfrnn_final = sfrnn.FPropDefaultTheta(inputs, paddings)
+        loss = tf.reduce_sum(sfrnn_outputs)
+        for fin in sfrnn_final.rnn:
+          loss += tf.reduce_sum(fin.m) + tf.reduce_sum(fin.c)
       xs = sfrnn.theta.Flatten() + [inputs]
       dxs = tf.gradients(loss, xs)
 
@@ -166,8 +166,9 @@ class LayersTestBase(tf.test.TestCase):
       sym_grads = [test_utils.PickEveryN(_, grad_step) for _ in sym_grads]
       num_grads = [
           test_utils.PickEveryN(
-              ComputeNumericGradient(sess, loss, v, delta=1e-4, step=grad_step),
-              grad_step) for v in xs
+              test_utils.ComputeNumericGradient(
+                  sess, loss, v, delta=1e-4, step=grad_step), grad_step)
+          for v in xs
       ]
       for (sym, num) in zip(sym_grads, num_grads):
         self.assertFalse(np.any(np.isnan(sym)))
@@ -177,6 +178,32 @@ class LayersTestBase(tf.test.TestCase):
 
 
 class LayersTest(LayersTestBase):
+
+  def testIdentitySeqLayer(self):
+    with self.session(use_gpu=False) as sess:
+      rnn_params = rnn_layers.IdentitySeqLayer.Params()
+      rnn_params.name = 'no_op'
+      rnn = rnn_params.cls(rnn_params)
+
+      np.random.seed(12345)
+      inputs_sequence = []
+      paddings_sequence = []
+      for _ in range(5):
+        inputs_sequence.append(
+            tf.constant(np.random.uniform(size=(3, 2)), tf.float32))
+        paddings_sequence.append(tf.zeros([3, 1]))
+
+      paddings_sequence[-1] = tf.constant([[1.0], [1.0], [1.0]])
+      paddings_sequence[-2] = tf.constant([[1.0], [1.0], [1.0]])
+
+      inputs, paddings = tf.stack(inputs_sequence), tf.stack(paddings_sequence)
+      outputs = rnn.FPropFullSequence(rnn.theta, inputs, paddings)
+
+      # Initialize all the variables, and then run one step.
+      tf.global_variables_initializer().run()
+
+      inputs_v, outputs_v = sess.run([inputs, outputs])
+      self.assertAllEqual(inputs_v, outputs_v)
 
   def testRNN(self):
     with self.session(use_gpu=False) as sess:
@@ -232,24 +259,6 @@ class LayersTest(LayersTestBase):
       self.assertAllClose(m_expected, actual.m)
       self.assertAllClose(c_expected, actual.c)
 
-  def testReversePaddedSequence(self):
-    with self.session(use_gpu=False):
-      # inputs is [seq_length, batch_size, input_dim] = [4, 3, 2]
-      # The length of each batch is [2, 3, 4]
-      inputs = tf.constant(
-          [[[1, 2], [3, 4], [5, 6]], [[11, 12], [13, 14], [15, 16]],
-           [[0, 0], [23, 24], [25, 26]], [[0, 0], [0, 0], [35, 36]]],
-          dtype=tf.float32)
-      paddings = tf.constant(
-          [[[0], [0], [0]], [[0], [0], [0]], [[1], [0], [0]], [[1], [1], [0]]],
-          dtype=tf.float32)
-      actual_output = rnn_layers._ReversePaddedSequence(inputs, paddings).eval()
-      expected_output = np.array(
-          [[[11, 12], [23, 24], [35, 36]], [[1, 2], [13, 14], [25, 26]],
-           [[0, 0], [3, 4], [15, 16]], [[0, 0], [0, 0], [5,
-                                                         6]]]).astype('float32')
-      self.assertAllClose(expected_output, actual_output)
-
   def _CreateCuDNNLSTMParams(self,
                              input_nodes,
                              cell_nodes,
@@ -304,7 +313,7 @@ class LayersTest(LayersTestBase):
     # Train graph
     with tf.Graph().as_default() as g:
       with self.session(use_gpu=True, graph=g) as sess:
-        g.seed = 87654321
+        tf.set_random_seed(87654321)
         init_op, outputs, final = _CreateLayer(is_eval=False)  # pylint:disable=unbalanced-tuple-unpacking
         saver = tf.train.Saver()
 
@@ -321,7 +330,7 @@ class LayersTest(LayersTestBase):
     # Eval graph
     with tf.Graph().as_default() as g:
       with self.session(use_gpu=False, graph=g) as sess:
-        g.seed = 87654321
+        tf.set_random_seed(87654321)
         outputs, final = _CreateLayer(is_eval=True)  # pylint:disable=unbalanced-tuple-unpacking
         saver = tf.train.Saver()
 
@@ -355,7 +364,7 @@ class LayersTest(LayersTestBase):
 
     with tf.Graph().as_default() as g:
       with self.session(use_gpu=True) as sess:
-        g.seed = 87654321
+        tf.set_random_seed(87654321)
         params = self._CreateCuDNNLSTMParams(
             input_nodes, cell_nodes, dtype=dtype, is_eval=False)
         rnn = rnn_layers.CuDNNLSTM(params)
@@ -377,7 +386,8 @@ class LayersTest(LayersTestBase):
         symbolic_grads = [gd.eval() for gd in grads]
         numerical_grads = []
         for v in all_vars:
-          numerical_grads.append(ComputeNumericGradient(sess, loss, v))
+          numerical_grads.append(
+              test_utils.ComputeNumericGradient(sess, loss, v))
         for x, y in zip(symbolic_grads, numerical_grads):
           self.assertAllClose(x, y)
 
@@ -430,7 +440,7 @@ class LayersTest(LayersTestBase):
       symbolic_grads = [gd.eval() for gd in grads]
       numerical_grads = []
       for v in all_vars:
-        numerical_grads.append(ComputeNumericGradient(sess, loss, v))
+        numerical_grads.append(test_utils.ComputeNumericGradient(sess, loss, v))
       for x, y in zip(symbolic_grads, numerical_grads):
         self.assertAllClose(x, y)
 
@@ -672,7 +682,7 @@ class LayersTest(LayersTestBase):
       symbolic_grads = [gd.eval() for gd in grads]
       numerical_grads = []
       for v in all_vars:
-        numerical_grads.append(ComputeNumericGradient(sess, loss, v))
+        numerical_grads.append(test_utils.ComputeNumericGradient(sess, loss, v))
       for x, y in zip(symbolic_grads, numerical_grads):
         self.assertAllClose(x, y, rtol=0.1, atol=0.1)
 
@@ -715,7 +725,7 @@ class LayersTest(LayersTestBase):
       symbolic_grads = [gd.eval() for gd in grads]
       numerical_grads = []
       for v in all_vars:
-        numerical_grads.append(ComputeNumericGradient(sess, loss, v))
+        numerical_grads.append(test_utils.ComputeNumericGradient(sess, loss, v))
       for x, y in zip(symbolic_grads, numerical_grads):
         self.assertAllClose(x, y, rtol=0.1, atol=0.1)
 
@@ -760,7 +770,7 @@ class LayersTest(LayersTestBase):
       symbolic_grads = [gd.eval() for gd in grads]
       numerical_grads = []
       for v in all_vars:
-        numerical_grads.append(ComputeNumericGradient(sess, loss, v))
+        numerical_grads.append(test_utils.ComputeNumericGradient(sess, loss, v))
       for x, y in zip(symbolic_grads, numerical_grads):
         self.assertAllClose(x, y, rtol=0.00001, atol=0.00001)
 
@@ -865,8 +875,9 @@ class LayersTest(LayersTestBase):
       sym_grads = [test_utils.PickEveryN(_, grad_step) for _ in sym_grads]
       num_grads = [
           test_utils.PickEveryN(
-              ComputeNumericGradient(sess, loss, v, delta=1e-4, step=grad_step),
-              grad_step) for v in [b, w, inputs]
+              test_utils.ComputeNumericGradient(
+                  sess, loss, v, delta=1e-4, step=grad_step), grad_step)
+          for v in [b, w, inputs]
       ]
       for (sym, num) in zip(sym_grads, num_grads):
         self.assertFalse(np.any(np.isnan(sym)))
@@ -881,7 +892,7 @@ class LayersTest(LayersTestBase):
     self._testFRNNGradHelper(py_utils.SessionConfig(inline=True))
 
   def testStackedFRNNDropout(self):
-    v1_out, unused_v1_fin = self._testStackedFRNNHelper(
+    v1_out, _ = self._testStackedFRNNHelper(
         rnn_layers.StackedFRNNLayerByLayer,
         tf.float32,
         trailing_pad_len=0,
@@ -894,6 +905,23 @@ class LayersTest(LayersTestBase):
 
   def testStackedFRNNLayerByLayerGrad(self):
     self._testStackedFRNNGradHelper(rnn_layers.StackedFRNNLayerByLayer)
+
+  def testStackedBiFRNNDropout(self):
+    v1_out = self._testStackedFRNNHelper(
+        rnn_layers.StackedBiFRNNLayerByLayer,
+        tf.float32,
+        trailing_pad_len=0,
+        keep_prob=0.5,
+        bi_directional=True)
+    if tf.test.is_gpu_available():
+      rtol = 1e-5
+    else:
+      rtol = 1e-6
+    self.assertAllClose([305.774384], [np.sum(v1_out * v1_out)], rtol=rtol)
+
+  def testStackedBiFRNNLayerByLayerGrad(self):
+    self._testStackedFRNNGradHelper(
+        rnn_layers.StackedBiFRNNLayerByLayer, bi_directional=True)
 
   def _testBidirectionalFRNNHelper(self,
                                    trailing_pad_len=0,
@@ -1015,8 +1043,9 @@ class LayersTest(LayersTestBase):
       sym_grads = [test_utils.PickEveryN(_, grad_step) for _ in sym_grads]
       num_grads = [
           test_utils.PickEveryN(
-              ComputeNumericGradient(sess, loss, v, delta=1e-4, step=grad_step),
-              grad_step) for v in [w0, b0, w1, b1, inputs]
+              test_utils.ComputeNumericGradient(
+                  sess, loss, v, delta=1e-4, step=grad_step), grad_step)
+          for v in [w0, b0, w1, b1, inputs]
       ]
       for (sym, num) in zip(sym_grads, num_grads):
         self.assertFalse(np.any(np.isnan(sym)))
@@ -1260,7 +1289,8 @@ class LayersTest(LayersTestBase):
       tf.global_variables_initializer().run()
       sym_grads = sess.run(grads)
       num_grads = [
-          ComputeNumericGradient(sess, loss, v, delta=1e-5) for v in parameters
+          test_utils.ComputeNumericGradient(sess, loss, v, delta=1e-5)
+          for v in parameters
       ]
       for i, (sym, num) in enumerate(zip(sym_grads, num_grads)):
         print([
@@ -1317,7 +1347,8 @@ class LayersTest(LayersTestBase):
       tf.global_variables_initializer().run()
       sym_grads = sess.run(grads)
       num_grads = [
-          ComputeNumericGradient(sess, loss, v, delta=1e-5) for v in parameters
+          test_utils.ComputeNumericGradient(sess, loss, v, delta=1e-5)
+          for v in parameters
       ]
       for i, (sym, num) in enumerate(zip(sym_grads, num_grads)):
         print([
@@ -1379,7 +1410,8 @@ class LayersTest(LayersTestBase):
       tf.global_variables_initializer().run()
       sym_grads = sess.run(grads)
       num_grads = [
-          ComputeNumericGradient(sess, loss, v, delta=1e-5) for v in parameters
+          test_utils.ComputeNumericGradient(sess, loss, v, delta=1e-5)
+          for v in parameters
       ]
       for i, (sym, num) in enumerate(zip(sym_grads, num_grads)):
         print([

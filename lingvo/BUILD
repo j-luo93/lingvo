@@ -11,6 +11,11 @@ config_setting(
     values = {"define": "using_cuda=true"},
 )
 
+config_setting(
+    name = "py3_mode",
+    values = {"force_python": "PY3"},
+)
+
 load(
     "//lingvo:lingvo.bzl",
     "lingvo_py_binary",
@@ -21,9 +26,8 @@ py_library(
     srcs = ["base_runner.py"],
     deps = [
         ":base_trial",
-        ":model_registry",
         # Implicit tensorflow dependency.
-        # Implicit tensorflow py proto dependency.,
+        # Implicit tensorflow py proto dependency.
         "//lingvo/core:cluster_factory",
         "//lingvo/core:early_stop",
         "//lingvo/core:py_utils",
@@ -73,6 +77,7 @@ py_test(
     deps = [
         ":model_imports",
         ":model_registry",
+        ":model_registry_test",
         # Implicit tensorflow dependency.
         "//lingvo/core:base_input_generator",
         "//lingvo/core:base_model",
@@ -107,17 +112,19 @@ py_library(
     deps = [
         ":base_trial",
         ":model_imports_no_params",
+        ":model_registry",
         # Implicit network file system dependency.
         "//lingvo:base_runner",
         # Implicit IPython dependency.
         # Implicit numpy dependency.
         # Implicit six dependency.
         # Implicit tensorflow dependency.
-        # Implicit tensorflow py proto dependency.,
-        # Implicit tensorflow grpc dependency.,
+        # Implicit tensorflow py proto dependency.
+        # Implicit tensorflow grpc dependency.
         "//lingvo/core:base_model",
         "//lingvo/core:base_model_params",
         "//lingvo/core:cluster_factory",
+        "//lingvo/core:inference_graph_exporter",
         "//lingvo/core:metrics",
         "//lingvo/core:py_utils",
     ],
@@ -129,7 +136,6 @@ lingvo_py_binary(
     deps = [
         ":model_imports",
         ":trainer_lib",
-        # Implicit IPython dependency.
     ],
 )
 
@@ -155,5 +161,31 @@ py_test(
         "//lingvo/core:py_utils",
         "//lingvo/tasks/image:input_generator",
         "//lingvo/tasks/image/params:mnist",
+    ],
+)
+
+lingvo_py_binary(
+    name = "ipython_kernel",
+    srcs = ["ipython_kernel.py"],
+    deps = [
+        ":model_imports",  # build_cleaner: keep
+        ":trainer_lib",  # build_cleaner: keep
+        "//lingvo/core:predictor",  # build_cleaner: keep
+        "//lingvo/core/ops:hyps_py_pb2",  # build_cleaner: keep
+        "//lingvo/tasks/punctuator/tools:download_brown_corpus",  # build_cleaner: keep
+    ],
+)
+
+genrule(
+    name = "tf_dot_protos",
+    srcs = [],
+    outs = ["tf_protos.tar"],
+    cmd =
+        "$(location //lingvo/tools:" +
+        "generate_tf_dot_protos) $(location " +
+        "//lingvo/tools:generate_proto_def) $(@D)",
+    tools = [
+        "//lingvo/tools:generate_proto_def",
+        "//lingvo/tools:generate_tf_dot_protos",
     ],
 )

@@ -65,11 +65,10 @@ py_library(
     deps = [
         # Implicit six dependency.
         # Implicit tensorflow dependency.
-        # Implicit tensorflow python framework_for_generated_wrappers dependency.,
+        # Implicit tensorflow python framework_for_generated_wrappers dependency.
         "//lingvo/core:attention",
         "//lingvo/core:base_decoder",
         "//lingvo/core:base_layer",
-        "//lingvo/core:cluster_factory",
         "//lingvo/core:layers",
         "//lingvo/core:layers_with_attention",
         "//lingvo/core:model_helper",
@@ -139,7 +138,6 @@ py_library(
         # Implicit tensorflow dependency.
         "//lingvo/core:base_layer",
         "//lingvo/core:base_model",
-        "//lingvo/core:cluster_factory",
         "//lingvo/core:metrics",
         "//lingvo/core:py_utils",
         "//lingvo/core:summary_utils",
@@ -168,4 +166,11 @@ py_test(
         "//lingvo/core:py_utils",
         "//lingvo/core:test_helper",
     ],
+)
+
+filegroup(
+    name = "wpm_ende",
+    srcs = glob(include = [
+        "wpm-ende*.voc",
+    ]),
 )

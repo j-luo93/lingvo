@@ -185,19 +185,25 @@ class BatchNormLayerTest(tf.test.TestCase):
 
 
 class ConvLayerTest(tf.test.TestCase):
+  """Tests conv layers.
 
-  def testConvLayerConstruction(self):
+  Note that there are multiple subclasses of BaseConv2DLayer and most cases
+  are tested via the concrete Conv2DLayer. Other tests are done against
+  other subclasses to cover key differences.
+  """
+
+  def testConv2DLayerConstruction(self):
     with self.session(use_gpu=True):
       tf.set_random_seed(398847392)
       np.random.seed(12345)
-      params = layers.ConvLayer.Params()
+      params = layers.Conv2DLayer.Params()
       params.name = 'conv'
       params.filter_shape = [3, 3, 3, 32]
       params.filter_stride = [2, 2]
       params.params_init = py_utils.WeightInit.Gaussian(0.1)
       params.is_eval = False
-      layers.ConvLayer(params)
-      conv_vars = tf.get_collection('ConvLayer_vars')
+      layers.Conv2DLayer(params)
+      conv_vars = tf.get_collection('Conv2DLayer_vars')
       conv_var_names = [x.name for x in conv_vars]
       expected_var_names = ['conv/w/var:0']
       self.assertEqual(expected_var_names, conv_var_names)
@@ -209,12 +215,72 @@ class ConvLayerTest(tf.test.TestCase):
       ]
       self.assertEqual(expected_var_names, bn_var_names)
 
-  def testConvLayerWithBiasConstruction(self):
-    """Tests ConvLayer with only bias and without batch normalization."""
+  def testDepthwiseConv2DLayerConstruction(self):
     with self.session(use_gpu=True):
       tf.set_random_seed(398847392)
       np.random.seed(12345)
-      params = layers.ConvLayer.Params()
+      params = layers.DepthwiseConv2DLayer.Params()
+      params.name = 'conv'
+      params.filter_shape = [3, 3, 3, 32]
+      params.filter_stride = [2, 2]
+      params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.is_eval = False
+      layers.DepthwiseConv2DLayer(params)
+      conv_vars = tf.get_collection('DepthwiseConv2DLayer_vars')
+      conv_var_names = [x.name for x in conv_vars]
+      expected_var_names = ['conv/w/var:0']
+      self.assertEqual(expected_var_names, conv_var_names)
+      bn_vars = tf.get_collection('BatchNormLayer_vars')
+      bn_var_names = [x.name for x in bn_vars]
+      expected_var_names = [
+          'conv/beta/var:0', 'conv/gamma/var:0', 'conv/moving_mean/var:0',
+          'conv/moving_variance/var:0'
+      ]
+      self.assertEqual(expected_var_names, bn_var_names)
+
+  def testSeparableConv2DLayerConstruction(self):
+    with self.session(use_gpu=True):
+      tf.set_random_seed(398847392)
+      np.random.seed(12345)
+      params = layers.SeparableConv2DLayer.Params()
+      params.name = 'conv'
+      params.filter_shape = [3, 3, 3, 32]
+      params.filter_stride = [2, 2]
+      params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.is_eval = False
+      params.cls(params)
+      # Vars for the outer conv layer.
+      conv_vars = tf.get_collection('SeparableConv2DLayer_vars')
+      conv_var_names = [x.name for x in conv_vars]
+      expected_var_names = ['conv/w/var:0']
+      self.assertSetEqual(set(expected_var_names), set(conv_var_names))
+      # Vars for the inner depthwise layer.
+      conv_vars = tf.get_collection('DepthwiseConv2DLayer_vars')
+      conv_var_names = [x.name for x in conv_vars]
+      expected_var_names = ['conv/depthwise_conv/w/var:0']
+      self.assertSetEqual(set(expected_var_names), set(conv_var_names))
+      bn_vars = tf.get_collection('BatchNormLayer_vars')
+      bn_var_names = [x.name for x in bn_vars]
+      expected_var_names = [
+          # Outer conv batchnorm.
+          'conv/beta/var:0',
+          'conv/gamma/var:0',
+          'conv/moving_mean/var:0',
+          'conv/moving_variance/var:0',
+          # Inner depthwise batchnorm.
+          'conv/depthwise_conv/beta/var:0',
+          'conv/depthwise_conv/gamma/var:0',
+          'conv/depthwise_conv/moving_mean/var:0',
+          'conv/depthwise_conv/moving_variance/var:0',
+      ]
+      self.assertSetEqual(set(expected_var_names), set(bn_var_names))
+
+  def testConv2DLayerWithBiasConstruction(self):
+    """Tests Conv2DLayer with only bias and without batch normalization."""
+    with self.session(use_gpu=True):
+      tf.set_random_seed(398847392)
+      np.random.seed(12345)
+      params = layers.Conv2DLayer.Params()
       params.name = 'conv'
       params.filter_shape = [3, 3, 3, 32]
       params.filter_stride = [2, 2]
@@ -222,8 +288,8 @@ class ConvLayerTest(tf.test.TestCase):
       params.is_eval = False
       params.bias = True
       params.batch_norm = False
-      layers.ConvLayer(params)
-      conv_vars = tf.get_collection('ConvLayer_vars')
+      layers.Conv2DLayer(params)
+      conv_vars = tf.get_collection('Conv2DLayer_vars')
       conv_var_names = [x.name for x in conv_vars]
       # Has both 'w' and 'b'.
       expected_var_names = ['conv/w/var:0', 'conv/b/var:0']
@@ -234,17 +300,42 @@ class ConvLayerTest(tf.test.TestCase):
       expected_var_names = []
       self.assertEqual(expected_var_names, bn_var_names)
 
-  def testConvLayerOutShape(self):
+  def testDepthwiseConv2DLayerWithBiasConstruction(self):
+    """Tests DepthwiseConv2D with only bias and without batch normalization."""
     with self.session(use_gpu=True):
       tf.set_random_seed(398847392)
       np.random.seed(12345)
-      params = layers.ConvLayer.Params()
+      params = layers.DepthwiseConv2DLayer.Params()
       params.name = 'conv'
       params.filter_shape = [3, 3, 3, 32]
       params.filter_stride = [2, 2]
       params.params_init = py_utils.WeightInit.Gaussian(0.1)
       params.is_eval = False
-      conv_layer = layers.ConvLayer(params)
+      params.bias = True
+      params.batch_norm = False
+      layers.DepthwiseConv2DLayer(params)
+      conv_vars = tf.get_collection('DepthwiseConv2DLayer_vars')
+      conv_var_names = [x.name for x in conv_vars]
+      # Has both 'w' and 'b'.
+      expected_var_names = ['conv/w/var:0', 'conv/b/var:0']
+      self.assertEqual(expected_var_names, conv_var_names)
+      # No BatchNorm variables.
+      bn_vars = tf.get_collection('BatchNormLayer_vars')
+      bn_var_names = [x.name for x in bn_vars]
+      expected_var_names = []
+      self.assertEqual(expected_var_names, bn_var_names)
+
+  def testConv2DLayerOutShape(self):
+    with self.session(use_gpu=True):
+      tf.set_random_seed(398847392)
+      np.random.seed(12345)
+      params = layers.Conv2DLayer.Params()
+      params.name = 'conv'
+      params.filter_shape = [3, 3, 3, 32]
+      params.filter_stride = [2, 2]
+      params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.is_eval = False
+      conv_layer = layers.Conv2DLayer(params)
       in_shape = tf.TensorShape([None, None, 10, 3])
       out_shape = conv_layer.OutShape(in_shape)
       self.assertEqual(out_shape.as_list(), [None, None, 5, 32])
@@ -252,18 +343,94 @@ class ConvLayerTest(tf.test.TestCase):
       out_shape = conv_layer.OutShape(in_shape)
       self.assertEqual(out_shape.as_list(), [None, 10, 5, 32])
 
-  def testConvLayerWithDilationOutShape(self):
+  def testDepthwiseConv2DLayerOutShape(self):
     with self.session(use_gpu=True):
       tf.set_random_seed(398847392)
       np.random.seed(12345)
-      params = layers.ConvLayer.Params()
+      params = layers.DepthwiseConv2DLayer.Params()
+      params.name = 'conv'
+      params.filter_shape = [3, 3, 3, 32]
+      params.filter_stride = [2, 2]
+      params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.is_eval = False
+      conv_layer = layers.DepthwiseConv2DLayer(params)
+      in_shape = tf.TensorShape([None, None, 10, 3])
+      out_shape = conv_layer.OutShape(in_shape)
+      self.assertEqual(out_shape.as_list(), [None, None, 5, 96])
+      in_shape = tf.TensorShape([None, 20, 10, 3])
+      out_shape = conv_layer.OutShape(in_shape)
+      self.assertEqual(out_shape.as_list(), [None, 10, 5, 96])
+
+  def testSeparableConv2DLayerOutShape(self):
+    with self.session(use_gpu=True):
+      tf.set_random_seed(398847392)
+      np.random.seed(12345)
+      params = layers.SeparableConv2DLayer.Params()
+      params.name = 'conv'
+      params.filter_shape = [3, 3, 3, 32]
+      params.filter_stride = [2, 2]
+      params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.is_eval = False
+      conv_layer = params.cls(params)
+      in_shape = tf.TensorShape([None, None, 10, 3])
+      out_shape = conv_layer.OutShape(in_shape)
+      self.assertEqual(out_shape.as_list(), [None, None, 5, 32])
+      in_shape = tf.TensorShape([None, 20, 10, 3])
+      out_shape = conv_layer.OutShape(in_shape)
+      self.assertEqual(out_shape.as_list(), [None, 10, 5, 32])
+
+  def testConv2DLayerWithDilationOutShape(self):
+    with self.session(use_gpu=True):
+      tf.set_random_seed(398847392)
+      np.random.seed(12345)
+      params = layers.Conv2DLayer.Params()
       params.name = 'conv'
       params.filter_shape = [3, 3, 3, 32]
       params.filter_stride = [1, 1]
       params.dilation_rate = [2, 2]
       params.params_init = py_utils.WeightInit.Gaussian(0.1)
       params.is_eval = False
-      conv_layer = layers.ConvLayer(params)
+      conv_layer = layers.Conv2DLayer(params)
+      # dilation_rate does not change output shape.
+      in_shape = tf.TensorShape([None, None, 10, 3])
+      out_shape = conv_layer.OutShape(in_shape)
+      self.assertEqual(out_shape.as_list(), [None, None, 10, 32])
+      in_shape = tf.TensorShape([None, 20, 10, 3])
+      out_shape = conv_layer.OutShape(in_shape)
+      self.assertEqual(out_shape.as_list(), [None, 20, 10, 32])
+
+  def testDepthwiseConv2DLayerWithDilationOutShape(self):
+    with self.session(use_gpu=True):
+      tf.set_random_seed(398847392)
+      np.random.seed(12345)
+      params = layers.DepthwiseConv2DLayer.Params()
+      params.name = 'conv'
+      params.filter_shape = [3, 3, 3, 32]
+      params.filter_stride = [1, 1]
+      params.dilation_rate = [2, 2]
+      params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.is_eval = False
+      conv_layer = layers.DepthwiseConv2DLayer(params)
+      # dilation_rate does not change output shape.
+      in_shape = tf.TensorShape([None, None, 10, 3])
+      out_shape = conv_layer.OutShape(in_shape)
+      self.assertEqual(out_shape.as_list(), [None, None, 10, 96])
+      in_shape = tf.TensorShape([None, 20, 10, 3])
+      out_shape = conv_layer.OutShape(in_shape)
+      self.assertEqual(out_shape.as_list(), [None, 20, 10, 96])
+
+  def testSeparableConv2DLayerWithDilationOutShape(self):
+    with self.session(use_gpu=True):
+      tf.set_random_seed(398847392)
+      np.random.seed(12345)
+      params = layers.SeparableConv2DLayer.Params()
+      params.name = 'conv'
+      params.filter_shape = [3, 3, 3, 32]
+      params.filter_stride = [1, 1]
+      params.dilation_rate = [2, 2]
+      params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.is_eval = False
+      conv_layer = params.cls(params)
       # dilation_rate does not change output shape.
       in_shape = tf.TensorShape([None, None, 10, 3])
       out_shape = conv_layer.OutShape(in_shape)
@@ -302,12 +469,14 @@ class ConvLayerTest(tf.test.TestCase):
                             input_shape,
                             filter_shape,
                             filter_stride,
-                            dilation_rate=None):
+                            dilation_rate=None,
+                            depth_multiplier=None,
+                            params_builder=layers.Conv2DLayer.Params):
     g = tf.Graph()
     with g.as_default():
       tf.set_random_seed(398847392)
       np.random.seed(12345)
-      params = layers.ConvLayer.Params()
+      params = params_builder()
       params.name = 'conv'
       params.filter_shape = filter_shape
       params.filter_stride = filter_stride
@@ -315,7 +484,9 @@ class ConvLayerTest(tf.test.TestCase):
         params.dilation_rate = dilation_rate
       params.params_init = py_utils.WeightInit.Gaussian(0.1)
       params.is_eval = False
-      conv_layer = layers.ConvLayer(params)
+      if depth_multiplier is not None:
+        params.depth_multiplier = depth_multiplier
+      conv_layer = params.cls(params)
 
       inp = tf.random_uniform(input_shape)
       inp_pad = tf.floor(0.5 + tf.random_uniform(input_shape[:2]))
@@ -330,7 +501,7 @@ class ConvLayerTest(tf.test.TestCase):
       # We expect out_pad.shape matches the 1st 2 dimensions of out.
       self.assertEqual(out.shape[:2], out_pad.shape)
 
-  def testConvLayerOutputShapes(self):
+  def testConv2DLayerOutputShapes(self):
     self._checkConvLayerShapes([2, 4, 4, 3], [3, 3, 3, 32], [1, 1])
     self._checkConvLayerShapes([2, 4, 4, 3], [3, 3, 3, 32], [2, 2])
     self._checkConvLayerShapes([2, 10, 4, 3], [3, 3, 3, 32], [3, 3])
@@ -340,20 +511,77 @@ class ConvLayerTest(tf.test.TestCase):
     self._checkConvLayerShapes(
         [2, 10, 4, 3], [3, 3, 3, 32], [1, 1], dilation_rate=[3, 3])
 
+  def testDepthwiseConv2DLayerOutputShapes(self):
+    self._checkConvLayerShapes(
+        [2, 4, 4, 3], [3, 3, 3, 32], [1, 1],
+        params_builder=layers.DepthwiseConv2DLayer.Params)
+    self._checkConvLayerShapes(
+        [2, 4, 4, 3], [3, 3, 3, 32], [2, 2],
+        params_builder=layers.DepthwiseConv2DLayer.Params)
+    self._checkConvLayerShapes(
+        [2, 10, 4, 3], [3, 3, 3, 32], [3, 3],
+        params_builder=layers.DepthwiseConv2DLayer.Params)
+
+    self._checkConvLayerShapes(
+        [2, 10, 4, 3], [3, 3, 3, 32], [1, 1],
+        dilation_rate=[2, 2],
+        params_builder=layers.DepthwiseConv2DLayer.Params)
+    self._checkConvLayerShapes(
+        [2, 10, 4, 3], [3, 3, 3, 32], [1, 1],
+        dilation_rate=[3, 3],
+        params_builder=layers.DepthwiseConv2DLayer.Params)
+
+  def testSeparableConv2DLayerOutputShapes(self):
+    self._checkConvLayerShapes(
+        [2, 4, 4, 3], [3, 3, 3, 32], [1, 1],
+        params_builder=layers.SeparableConv2DLayer.Params)
+    self._checkConvLayerShapes(
+        [2, 4, 4, 3], [3, 3, 3, 32], [2, 2],
+        params_builder=layers.SeparableConv2DLayer.Params)
+    self._checkConvLayerShapes(
+        [2, 10, 4, 3], [3, 3, 3, 32], [3, 3],
+        params_builder=layers.SeparableConv2DLayer.Params)
+    # Dilations.
+    self._checkConvLayerShapes(
+        [2, 10, 4, 3], [3, 3, 3, 32], [1, 1],
+        dilation_rate=[2, 2],
+        params_builder=layers.SeparableConv2DLayer.Params)
+    self._checkConvLayerShapes(
+        [2, 10, 4, 3], [3, 3, 3, 32], [1, 1],
+        dilation_rate=[3, 3],
+        params_builder=layers.SeparableConv2DLayer.Params)
+    # Depth multiplier.
+    self._checkConvLayerShapes(
+        [2, 4, 4, 3], [3, 3, 3, 32], [1, 1],
+        params_builder=layers.SeparableConv2DLayer.Params,
+        depth_multiplier=2)
+    self._checkConvLayerShapes(
+        [2, 4, 4, 3], [3, 3, 3, 32], [2, 2],
+        params_builder=layers.SeparableConv2DLayer.Params,
+        depth_multiplier=6)
+    self._checkConvLayerShapes(
+        [2, 10, 4, 3], [3, 3, 3, 32], [3, 3],
+        params_builder=layers.SeparableConv2DLayer.Params,
+        depth_multiplier=12)
+
   def _evalConvLayerFProp(self,
+                          params_builder=layers.Conv2DLayer.Params,
                           batch_norm=True,
                           weight_norm=False,
                           bias=False,
                           activation='RELU',
                           conv_last=False,
                           strides=(2, 2),
-                          dilation_rate=(1, 1)):
+                          dilation_rate=(1, 1),
+                          bn_fold_weights=False,
+                          is_eval=False,
+                          quantized=False):
     self._ClearCachedSession()
     tf.reset_default_graph()
     with self.session(use_gpu=True) as sess:
       tf.set_random_seed(398847392)
       np.random.seed(12345)
-      params = layers.ConvLayer.Params()
+      params = params_builder()
       params.name = 'conv'
       params.filter_shape = [3, 3, 3, 2]
       params.filter_stride = strides
@@ -361,12 +589,16 @@ class ConvLayerTest(tf.test.TestCase):
       params.params_init = py_utils.WeightInit.Gaussian(0.1)
       params.conv_last = conv_last
       params.batch_norm = batch_norm
+      params.bn_fold_weights = bn_fold_weights
       params.weight_norm = weight_norm
       params.bias = bias
       params.activation = activation
-      params.is_eval = False
+      params.is_eval = is_eval
 
-      conv_layer = layers.ConvLayer(params)
+      if quantized:
+        params.qdomain.default = quant_utils.PassiveAsymQDomain.Params()
+
+      conv_layer = params.cls(params)
       in_padding1 = tf.zeros([2, 4], dtype=tf.float32)
       inputs1 = tf.constant(
           np.random.normal(0.1, 0.5, [2, 4, 4, 3]), dtype=tf.float32)
@@ -378,7 +610,7 @@ class ConvLayerTest(tf.test.TestCase):
       self.assertAllClose(v1, v2)
       return v1
 
-  def testConvLayerFProp(self):
+  def testConv2DLayerFProp(self):
     # pyformat: disable
     # pylint: disable=bad-whitespace
     expected_output1 = [
@@ -393,10 +625,56 @@ class ConvLayerTest(tf.test.TestCase):
     # pyformat: enable
     # pylint: enable=bad-whitespace
     actual = self._evalConvLayerFProp()
-    print(['actual = ', np.array_repr(actual)])
+    print('actual = ', np.array_repr(actual))
     self.assertAllClose(expected_output1, actual)
 
-  def testConvLayerWithDilationFProp(self):
+  def testDepthwiseConv2DLayerFProp(self):
+    # pyformat: disable
+    # pylint: disable=bad-whitespace
+    expected_output1 = [
+        [[[ 0.93514717,  0.35602099,  0.        ,  0.51261222,  0.        ,
+            1.4310323 ],
+          [ 0.        ,  0.        ,  0.49176404,  0.        ,  1.01494753,
+            0.51337928]],
+         [[ 0.62087697,  0.34572476,  0.        ,  0.19352221,  0.47142431,
+            0.        ],
+          [ 0.81119895,  1.00890303,  0.90471351,  0.        ,  1.22736526,
+            0.        ]]],
+        [[[ 0.        ,  0.        ,  0.48927376,  0.        ,  0.74019426,
+            0.        ],
+          [ 0.        ,  0.        ,  1.49952257,  0.        ,  0.        ,
+            0.        ]],
+         [[ 0.29156703,  0.        ,  0.        ,  1.14509106,  0.        ,
+            0.74238932],
+          [ 0.91312039,  1.39783907,  0.        ,  1.47650909,  0.        ,
+            0.37969294]]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    actual = self._evalConvLayerFProp(
+        params_builder=layers.DepthwiseConv2DLayer.Params)
+    print('actual = ', np.array_repr(actual))
+    self.assertAllClose(expected_output1, actual)
+
+  def testSeparableConv2DLayerFProp(self):
+    # pyformat: disable
+    # pylint: disable=bad-whitespace
+    expected_output1 =[
+        [[[ 0.39866772,  0.        ],
+          [ 1.36471784,  0.        ]],
+         [[ 0.        ,  0.        ],
+          [ 0.        ,  0.        ]]],
+        [[[ 1.15356529,  0.1036691 ],
+          [ 0.12865055,  0.61244327]],
+         [[ 0.03609803,  1.81620765],
+          [ 0.        ,  0.23052886]]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    actual = self._evalConvLayerFProp(
+        params_builder=layers.SeparableConv2DLayer.Params)
+    print('actual = ', np.array_repr(actual))
+    self.assertAllClose(expected_output1, actual)
+
+  def testConv2DLayerWithDilationFProp(self):
     # pyformat: disable
     # pylint: disable=bad-whitespace
     expected_output1 = [
@@ -435,10 +713,55 @@ class ConvLayerTest(tf.test.TestCase):
     # pyformat: enable
     # pylint: enable=bad-whitespace
     actual = self._evalConvLayerFProp(strides=[1, 1], dilation_rate=[2, 2])
-    print(['testConvLayerWithDilationFProp actual = ', np.array_repr(actual)])
+    print('testConvLayerWithDilationFProp actual = ', np.array_repr(actual))
     self.assertAllClose(expected_output1, actual)
 
-  def testConvLayerConvFirstVsLastFProp(self):
+  def testSeparableConv2DLayerWithDilationFProp(self):
+    # pyformat: disable
+    # pylint: disable=bad-whitespace
+    expected_output1 = [
+        [[[ 0.21535617,  0.86965537],
+          [ 2.11499524,  1.2463783 ],
+          [ 0.        ,  0.39275286],
+          [ 0.        ,  0.        ]],
+         [[ 1.12706482,  1.37450278],
+          [ 0.        ,  0.        ],
+          [ 0.        ,  0.        ],
+          [ 1.2390101 ,  0.22932449]],
+         [[ 0.        ,  0.        ],
+          [ 0.15051894,  1.32616639],
+          [ 0.        ,  0.        ],
+          [ 0.72912866,  0.47753802]],
+         [[ 0.91655868,  0.        ],
+          [ 0.88526261,  0.26690534],
+          [ 0.        ,  0.26084688],
+          [ 0.42923039,  0.        ]]],
+        [[[ 0.82440329,  0.        ],
+          [ 0.49015623,  0.52662987],
+          [ 0.        ,  0.        ],
+          [ 0.35344127,  0.        ]],
+         [[ 0.        ,  0.        ],
+          [ 0.        ,  0.        ],
+          [ 0.43848675,  0.        ],
+          [ 0.        ,  1.21124518]],
+         [[ 1.1026746 ,  1.39578998],
+          [ 0.        ,  0.        ],
+          [ 0.34652925,  0.        ],
+          [ 0.        ,  1.26868236]],
+         [[ 0.91519427,  0.09030763],
+          [ 0.        ,  0.59271163],
+          [ 0.        ,  0.54207176],
+          [ 0.        ,  0.        ]]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    actual = self._evalConvLayerFProp(
+        strides=[1, 1],
+        dilation_rate=[2, 2],
+        params_builder=layers.SeparableConv2DLayer.Params)
+    print('testConvLayerWithDilationFProp actual = ', np.array_repr(actual))
+    self.assertAllClose(expected_output1, actual)
+
+  def testConv2DLayerConvFirstVsLastFProp(self):
     """Compare results of conv first vs. last."""
     # ... with batch_norm and activation disabled.
     self.assertAllClose(
@@ -447,7 +770,7 @@ class ConvLayerTest(tf.test.TestCase):
         self._evalConvLayerFProp(
             batch_norm=False, activation='NONE', conv_last=True))
 
-  def testConvLayerFPropConvLast(self):
+  def testConv2DLayerFPropConvLast(self):
     # pyformat: disable
     # pylint: disable=bad-whitespace
     expected_output1 = [
@@ -465,14 +788,14 @@ class ConvLayerTest(tf.test.TestCase):
     print(['ConvLast actual = ', np.array_repr(actual)])
     self.assertAllClose(expected_output1, actual)
 
-  def testConvLayerConvWithBias(self):
+  def testConv2DLayerConvWithBias(self):
     """Compare results with bias vs. with neither batch_norm nor bias."""
     # Results should match since bias is initialized to be 0.
     self.assertAllClose(
         self._evalConvLayerFProp(batch_norm=False, bias=False),
         self._evalConvLayerFProp(batch_norm=False, bias=True))
 
-  def testConvLayerWeightNormFProp(self):
+  def testConv2DLayerWeightNormFProp(self):
     # pyformat: disable
     # pylint: disable=bad-whitespace
     expected_output = [
@@ -487,8 +810,129 @@ class ConvLayerTest(tf.test.TestCase):
     # pyformat: enable
     # pylint: enable=bad-whitespace
     actual = self._evalConvLayerFProp(weight_norm=True)
-    print(['actual1 = ', np.array_repr(actual)])
+    print('actual1 = ', np.array_repr(actual))
     self.assertAllClose(expected_output, actual)
+
+  def testDepthwiseConv2DLayerWeightNormFProp(self):
+    # pyformat: disable
+    # pylint: disable=bad-whitespace
+    expected_output = [
+        [[[ 0.97023201,  0.37429881,  0.        ,  0.53157473,  0.        ,
+            1.60764372],
+          [ 0.        ,  0.        ,  0.50401598,  0.        ,  1.07683432,
+            0.57673818]],
+         [[ 0.644171  ,  0.36347377,  0.        ,  0.20068097,  0.50016963,
+            0.        ],
+          [ 0.8416335 ,  1.06069875,  0.92725372,  0.        ,  1.30220449,
+            0.        ]]],
+        [[[ 0.        ,  0.        ,  0.50146359,  0.        ,  0.78532791,
+            0.        ],
+          [ 0.        ,  0.        ,  1.53688192,  0.        ,  0.        ,
+            0.        ]],
+         [[ 0.302506  ,  0.        ,  0.        ,  1.18745029,  0.        ,
+            0.83401161],
+          [ 0.94737887,  1.46960247,  0.        ,  1.53112805,  0.        ,
+            0.42655289]]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    actual = self._evalConvLayerFProp(
+        weight_norm=True, params_builder=layers.DepthwiseConv2DLayer.Params)
+    print('actual1 = ', np.array_repr(actual))
+    self.assertAllClose(expected_output, actual)
+
+  def testSeparableConv2DLayerWeightNormFProp(self):
+    # pyformat: disable
+    # pylint: disable=bad-whitespace
+    expected_output = [
+        [[[ 0.41837293,  0.        ],
+          [ 1.39592457,  0.        ]],
+         [[ 0.        ,  0.        ],
+          [ 0.        ,  0.        ]]],
+        [[[ 1.20513153,  0.11938372],
+          [ 0.1284119 ,  0.6927582 ]],
+         [[ 0.0227453 ,  2.05591369],
+          [ 0.        ,  0.26530063]]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    actual = self._evalConvLayerFProp(
+        weight_norm=True, params_builder=layers.SeparableConv2DLayer.Params)
+    print('actual1 = ', np.array_repr(actual))
+    self.assertAllClose(expected_output, actual)
+
+  def testConv2DLayerFoldedBatchNormFProp(self):
+    actual_unfolded = self._evalConvLayerFProp(
+        batch_norm=True, bn_fold_weights=False)
+    actual_folded = self._evalConvLayerFProp(
+        batch_norm=True, bn_fold_weights=True)
+    print('testConvLayerFoldedBatchNormFProp folded = ',
+          np.array_repr(actual_folded))
+    print('testConvLayerFoldedBatchNormFProp unfolded = ',
+          np.array_repr(actual_unfolded))
+    self.assertAllClose(actual_folded, actual_unfolded)
+
+  def testDepthwiseConv2DLayerFoldedBatchNormFProp(self):
+    actual_unfolded = self._evalConvLayerFProp(
+        batch_norm=True,
+        bn_fold_weights=False,
+        params_builder=layers.DepthwiseConv2DLayer.Params)
+    actual_folded = self._evalConvLayerFProp(
+        batch_norm=True,
+        bn_fold_weights=True,
+        params_builder=layers.DepthwiseConv2DLayer.Params)
+    print('testDepthwiseConvLayerFoldedBatchNormFProp folded = ',
+          np.array_repr(actual_folded))
+    print('testDepthwiseConvLayerFoldedBatchNormFProp unfolded = ',
+          np.array_repr(actual_unfolded))
+    self.assertAllClose(actual_folded, actual_unfolded)
+
+  def testSeparableConv2DLayerFoldedBatchNormFProp(self):
+    actual_unfolded = self._evalConvLayerFProp(
+        batch_norm=True,
+        bn_fold_weights=False,
+        params_builder=layers.SeparableConv2DLayer.Params)
+    actual_folded = self._evalConvLayerFProp(
+        batch_norm=True,
+        bn_fold_weights=True,
+        params_builder=layers.SeparableConv2DLayer.Params)
+    print('testSeparableConvLayerFoldedBatchNormFProp folded = ',
+          np.array_repr(actual_folded))
+    print('testSeparableConvLayerFoldedBatchNormFProp unfolded = ',
+          np.array_repr(actual_unfolded))
+    self.assertAllClose(actual_folded, actual_unfolded)
+
+  def testConvLayerFoldedBatchNormFPropEval(self):
+    actual_unfolded = self._evalConvLayerFProp(
+        batch_norm=True, bn_fold_weights=False, is_eval=True)
+    actual_folded = self._evalConvLayerFProp(
+        batch_norm=True, bn_fold_weights=True, is_eval=True)
+    print('testConvLayerFoldedBatchNormFPropEval folded = ',
+          np.array_repr(actual_folded))
+    print('testConvLayerFoldedBatchNormFPropEval unfolded = ',
+          np.array_repr(actual_unfolded))
+    self.assertAllClose(actual_folded, actual_unfolded)
+
+  def testConvLayerFoldedBatchNormFPropQuantized(self):
+    # pyformat: disable
+    # pylint: disable=bad-whitespace
+    expected_output = [
+       [[[ 0.36997819,  0.91361964],
+         [ 0.07550576,  0.        ]],
+
+        [[ 0.35487702,  0.        ],
+         [ 1.92539668,  0.        ]]],
+       [[[ 0.27937129,  0.        ],
+         [ 0.        ,  0.        ]],
+
+        [[ 0.        ,  0.86831617],
+         [ 0.        ,  1.59317136]]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+
+    actual_folded = self._evalConvLayerFProp(
+        batch_norm=True, bn_fold_weights=True, quantized=True)
+    print('testConvLayerFoldedBatchNormFPropQuantized folded = ',
+          np.array_repr(actual_folded))
+    self.assertAllClose(actual_folded, expected_output)
 
   def testCausalConvLayerFProp(self):
     with self.session(use_gpu=True) as sess:
@@ -630,15 +1074,18 @@ class ConvLayerTest(tf.test.TestCase):
 
   def _evalConvSetLayerFProp(self,
                              batch_norm=True,
+                             bn_fold_weights=False,
                              weight_norm=False,
                              bias=False,
                              activation='RELU',
                              conv_last=False,
                              strides=(2, 2),
-                             dilation_rate=(1, 1)):
+                             dilation_rate=(1, 1),
+                             quantized=False,
+                             dump_graphdef=False):
     self._ClearCachedSession()
     ops.reset_default_graph()
-    with self.session(use_gpu=True):
+    with self.session(use_gpu=True) as sess:
       tf.set_random_seed(398847392)
       np.random.seed(12345)
       params = layers.ConvSetLayer.Params()
@@ -649,10 +1096,13 @@ class ConvLayerTest(tf.test.TestCase):
       params.cnn_tpl.params_init = py_utils.WeightInit.Gaussian(0.1)
       params.cnn_tpl.conv_last = conv_last
       params.cnn_tpl.batch_norm = batch_norm
+      params.cnn_tpl.bn_fold_weights = bn_fold_weights
       params.cnn_tpl.weight_norm = weight_norm
       params.cnn_tpl.bias = bias
       params.cnn_tpl.activation = activation
       params.cnn_tpl.is_eval = False
+      if quantized:
+        params.qdomain.default = quant_utils.PassiveAsymQDomain.Params()
 
       conv_set_layer = layers.ConvSetLayer(params)
       in_padding1 = tf.zeros([2, 4], dtype=tf.float32)
@@ -661,6 +1111,11 @@ class ConvLayerTest(tf.test.TestCase):
 
       output1, _ = conv_set_layer.FPropDefaultTheta(inputs1, in_padding1)
       tf.global_variables_initializer().run()
+
+      if dump_graphdef:
+        print('ConvSet GraphDef:', sess.graph.as_graph_def())
+        assert False, 'Disable "dump_graphdef" before submit'
+
       return output1.eval()
 
   def testConvSetLayerFProp(self):
@@ -680,6 +1135,29 @@ class ConvLayerTest(tf.test.TestCase):
     # pylint: enable=bad-whitespace,bad-continuation
     actual = self._evalConvSetLayerFProp()
     print(['actual = ', np.array_repr(actual)])
+    self.assertAllClose(expected_output1, actual)
+
+  def testConvSetLayerFPropQuantized(self):
+    # pyformat: disable
+    # pylint: disable=bad-whitespace,bad-continuation
+    expected_output1 = [
+        [[[ 1.04016984,  0.        ,  1.28103447,  0.        ],
+          [ 0.        ,  0.        ,  0.        ,  1.20986581]],
+         [[ 0.        ,  0.18681753,  0.        ,  0.        ],
+          [ 1.35328221,  2.26849842,  0.        ,  0.        ]]],
+        [[[ 0.        ,  0.24909003,  0.        ,  0.        ],
+          [ 1.14100266,  0.        ,  0.98746401,  1.83259094]],
+         [[ 0.        ,  0.        ,  1.04084051,  0.        ],
+          [ 0.12736773,  0.38253111,  0.32025862,  0.5159722 ]]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace,bad-continuation
+    actual = self._evalConvSetLayerFProp(bn_fold_weights=True, quantized=True)
+    # Note that we don't have many ways to verify in a unit test that the
+    # quant nodes were added properly; however, if their placement changes,
+    # it will very likely perturb the golden values above. If digging deeper,
+    # add 'dump_graphdef=True' to the above call and inspect the graphdef:
+    # There should be one layer of fake_quant* nodes before the ConcatV2.
+    print('actual = ', np.array_repr(actual))
     self.assertAllClose(expected_output1, actual)
 
   # TODO(yonghui): more test for convolution layer
@@ -789,7 +1267,12 @@ class ProjectionLayerTest(tf.test.TestCase):
                            affine_last=False,
                            input_dim=3,
                            output_dim=2,
-                           quantized=False):
+                           quantized=False,
+                           has_bias=False,
+                           bn_fold_weights=None,
+                           expect_bn_fold_weights=None,
+                           is_eval=False,
+                           layer_callback=None):
     self._ClearCachedSession()
     tf.reset_default_graph()
     with self.session(use_gpu=True) as sess:
@@ -799,19 +1282,22 @@ class ProjectionLayerTest(tf.test.TestCase):
       params.name = 'proj'
       params.input_dim = input_dim
       params.output_dim = output_dim
-      # Disable both activation and batch_norm.
+      params.has_bias = has_bias
+      if has_bias:
+        params.bias_init = 5.0
       params.activation = activation
       params.batch_norm = batch_norm
       params.weight_norm = weight_norm
       params.affine_last = affine_last
       params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.bn_fold_weights = bn_fold_weights
       if quantized:
         cc_schedule = quant_utils.FakeQuantizationSchedule.Params().Set(
             clip_end_step=1, quant_start_step=1)
         qdomain_default = quant_utils.SymetricScheduledClipQDomain.Params().Set(
             cc_schedule=cc_schedule.Copy())
         params.qdomain.default = qdomain_default.Copy()
-      params.is_eval = False
+      params.is_eval = is_eval
 
       in_padding = tf.zeros([2, 4, 1], dtype=tf.float32)
       inputs = tf.constant(
@@ -821,6 +1307,11 @@ class ProjectionLayerTest(tf.test.TestCase):
         inputs = tf.reshape(inputs, [-1, 3])
 
       proj_layer = layers.ProjectionLayer(params)
+      if layer_callback:
+        layer_callback(proj_layer)
+      if expect_bn_fold_weights is not None:
+        self.assertEqual(expect_bn_fold_weights, proj_layer._is_bn_folded)
+
       output = proj_layer.FPropDefaultTheta(inputs, in_padding)
       tf.global_variables_initializer().run()
       if quantized:
@@ -843,12 +1334,76 @@ class ProjectionLayerTest(tf.test.TestCase):
     # pyformat: enable
     # pylint: enable=bad-whitespace
     for reshape_to_2d in (False, True):
-      actual = self._evalProjectionLayer(reshape_to_2d=reshape_to_2d)
+      actual = self._evalProjectionLayer(
+          reshape_to_2d=reshape_to_2d, expect_bn_fold_weights=False)
       if reshape_to_2d:
         expected_output = np.reshape(np.array(expected_output), (-1, 2))
       tf.logging.info('expected = %s', expected_output)
       tf.logging.info('actual = %s', np.array_repr(actual))
       self.assertAllClose(expected_output, actual)
+
+  def testProjectionLayerFPropWithBias(self):
+    # pylint: disable=bad-whitespace
+    # pyformat: disable
+    expected_output = [
+        [[ 4.98987579,  5.03493643],
+         [ 5.01192808,  5.0917592 ],
+         [ 5.01156807,  4.99741936],
+         [ 4.96849394,  5.00982761]],
+        [[ 5.02098131,  4.98014927],
+         [ 5.00650883,  4.87676954],
+         [ 4.98995209,  4.91770315],
+         [ 4.95948696,  5.138731  ]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    # Tested without batch_norm because batch_norm will mostly cancel out the
+    # affect of bias.
+    actual = self._evalProjectionLayer(
+        has_bias=True,
+        batch_norm=False,
+        expect_bn_fold_weights=False,
+        activation='RELU6')
+    tf.logging.info('expected = %s', expected_output)
+    tf.logging.info('actual = %s', np.array_repr(actual))
+    self.assertAllClose(expected_output, actual)
+
+  def testProjectionLayerExplicitFolding(self):
+    unfolded = self._evalProjectionLayer(
+        bn_fold_weights=False, expect_bn_fold_weights=False)
+    folded = self._evalProjectionLayer(
+        bn_fold_weights=True, expect_bn_fold_weights=True)
+    tf.logging.info('unfolded = %s', np.array_repr(unfolded))
+    tf.logging.info('folded = %s', np.array_repr(folded))
+    self.assertAllClose(folded, unfolded)
+
+  def testProjectionLayerExplicitFoldingEval(self):
+    unfolded = self._evalProjectionLayer(
+        bn_fold_weights=False, expect_bn_fold_weights=False, is_eval=True)
+    folded = self._evalProjectionLayer(
+        bn_fold_weights=True, expect_bn_fold_weights=True, is_eval=True)
+    tf.logging.info('unfolded = %s', np.array_repr(unfolded))
+    tf.logging.info('folded = %s', np.array_repr(folded))
+    self.assertAllClose(folded, unfolded)
+
+  def testProjectionLayerExplicitFoldingNoBatchNorm(self):
+    unfolded = self._evalProjectionLayer(
+        batch_norm=False, bn_fold_weights=False, expect_bn_fold_weights=False)
+    # Note that weight folding will report as disabled because batch norm is
+    # disabled.
+    folded = self._evalProjectionLayer(
+        batch_norm=False, bn_fold_weights=True, expect_bn_fold_weights=False)
+    tf.logging.info('unfolded = %s', np.array_repr(unfolded))
+    tf.logging.info('folded = %s', np.array_repr(folded))
+    self.assertAllClose(folded, unfolded)
+
+  def testProjectionLayerExplicitFoldingWithWeightNorm(self):
+    unfolded = self._evalProjectionLayer(
+        weight_norm=True, bn_fold_weights=False, expect_bn_fold_weights=False)
+    folded = self._evalProjectionLayer(
+        weight_norm=True, bn_fold_weights=True, expect_bn_fold_weights=True)
+    tf.logging.info('unfolded = %s', np.array_repr(unfolded))
+    tf.logging.info('folded = %s', np.array_repr(folded))
+    self.assertAllClose(folded, unfolded)
 
   def testProjectionLayerWeightNorm(self):
     # pylint: disable=bad-whitespace
@@ -933,30 +1488,122 @@ class ProjectionLayerTest(tf.test.TestCase):
       for sg, ng in zip(sym_grads, num_grads):
         self.assertAllClose(sg, ng, rtol=1e-06, atol=1e-06)
 
-  def testProjectionLayerFPropQuantized(self):
+  def testProjectionLayerFPropQuantizedWithUnfusedActivation(self):
     # pylint: disable=bad-whitespace
     # pyformat: disable
     expected_output = [
-        [[-0.0546875,  0.3203125],
-         [ 0.359375 ,  0.7421875],
-         [ 0.359375 , -0.109375 ],
-         [-0.6015625,  0.0703125]],
-        [[ 0.5234375, -0.28125  ],
-         [ 0.359375 , -0.9140625],
-         [-0.0546875, -0.7578125],
-         [-0.71875  ,  0.921875 ]]]
+        [[-0.1328125,  0.3125   ],
+         [ 0.421875 ,  0.734375 ],
+         [ 0.421875 , -0.109375 ],
+         [-0.6015625,  0.0078125]],
+        [[ 0.6015625, -0.3046875],
+         [ 0.3046875, -0.7578125],
+         [-0.125    , -0.7578125],
+         [-0.734375 ,  0.7578125]]]
     # pyformat: enable
     # pylint: enable=bad-whitespace
-    for reshape_to_2d in (False, True):
-      # Note: Generally, quantized projections prefer a TANH activation.
-      # We only test that here.
-      actual = self._evalProjectionLayer(
-          reshape_to_2d=reshape_to_2d, activation='TANH', quantized=True)
-      if reshape_to_2d:
-        expected_output = np.reshape(np.array(expected_output), (-1, 2))
-      tf.logging.info('expected = %s', expected_output)
-      tf.logging.info('actual = %s', np.array_repr(actual))
-      self.assertAllClose(expected_output, actual)
+    def CheckLayer(proj_layer):
+      # Should not error because this qtensor is defined.
+      proj_layer.QTensor('activation', tf.convert_to_tensor(0.))
+      # The intermediate tensor should be defined.
+      proj_layer.QTensor('affine_matmul', tf.convert_to_tensor(0.))
+
+    # When quantization enabled, batchnorm folding should auto enable.
+    # TANH is unfused.
+    actual = self._evalProjectionLayer(
+        activation='TANH',
+        quantized=True,
+        expect_bn_fold_weights=True,
+        layer_callback=CheckLayer)
+    tf.logging.info('expected = %s', expected_output)
+    tf.logging.info('actual = %s', np.array_repr(actual))
+    self.assertAllClose(expected_output, actual)
+
+  def testProjectionLayerFPropQuantizedWithFusedActivation(self):
+    # pylint: disable=bad-whitespace
+    # pyformat: disable
+    expected_output = [
+        [[ 0.       ,  0.3203125],
+         [ 0.453125 ,  0.9375   ],
+         [ 0.4453125,  0.       ],
+         [ 0.       ,  0.0078125]],
+        [[ 0.6953125,  0.       ],
+         [ 0.3125   ,  0.       ],
+         [ 0.       ,  0.       ],
+         [ 0.       ,  0.9921875]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    def CheckLayer(proj_layer):
+      # Should not error because this qtensor is defined.
+      proj_layer.QTensor('activation', tf.convert_to_tensor(0.))
+      with self.assertRaises(AssertionError):
+        # The intermediate tensor should *not* be quantized.
+        proj_layer.QTensor('affine_matmul', tf.convert_to_tensor(0.))
+
+    # When quantization enabled, batchnorm folding should auto enable.
+    # RELU6 is fused.
+    actual = self._evalProjectionLayer(
+        activation='RELU6',
+        quantized=True,
+        expect_bn_fold_weights=True,
+        layer_callback=CheckLayer)
+    tf.logging.info('expected = %s', expected_output)
+    tf.logging.info('actual = %s', np.array_repr(actual))
+    self.assertAllClose(expected_output, actual)
+
+  def testProjectionLayerFPropQuantizedOnlyMatmul(self):
+    # pylint: disable=bad-whitespace
+    # pyformat: disable
+    expected_output = [
+        [[-0.0078125,  0.0390625],
+         [ 0.0078125,  0.09375  ],
+         [ 0.0078125,  0.       ],
+         [-0.03125  ,  0.015625 ]],
+        [[ 0.015625 , -0.015625 ],
+         [ 0.0078125, -0.125    ],
+         [-0.0078125, -0.078125 ],
+         [-0.0390625,  0.1484375]]]
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    def CheckLayer(proj_layer):
+      # Should not error because this qtensor is defined.
+      proj_layer.QTensor('affine_matmul', tf.convert_to_tensor(0.))
+
+    actual = self._evalProjectionLayer(
+        activation='NONE',
+        quantized=True,
+        batch_norm=False,
+        expect_bn_fold_weights=False,
+        layer_callback=CheckLayer)
+    tf.logging.info('expected = %s', expected_output)
+    tf.logging.info('actual = %s', np.array_repr(actual))
+    self.assertAllClose(expected_output, actual)
+
+  def testProjectionLayerFPropQuantizedOnlyMatmulBias(self):
+    # pylint: disable=bad-whitespace
+    # pyformat: disable
+    # Saturated because of the out of range bias.
+    expected_output = [[[0.9921875, 0.9921875], [0.9921875, 0.9921875],
+                        [0.9921875, 0.9921875], [0.9921875, 0.9921875]],
+                       [[0.9921875, 0.9921875], [0.9921875, 0.9921875],
+                        [0.9921875, 0.9921875], [0.9921875, 0.9921875]]]
+
+    # pyformat: enable
+    # pylint: enable=bad-whitespace
+    def CheckLayer(proj_layer):
+      # Should not error because this qtensor is defined.
+      proj_layer.QTensor('affine_matmul', tf.convert_to_tensor(0.))
+
+    actual = self._evalProjectionLayer(
+        activation='NONE',
+        quantized=True,
+        has_bias=True,
+        batch_norm=False,
+        expect_bn_fold_weights=False,
+        layer_callback=CheckLayer)
+    tf.logging.info('expected = %s', expected_output)
+    tf.logging.info('actual = %s', np.array_repr(actual))
+    self.assertAllClose(expected_output, actual)
 
   def testFCLayerConstruction(self):
     with self.session(use_gpu=True):
@@ -1148,7 +1795,7 @@ class EmbeddingLayerTest(tf.test.TestCase):
       emb_layer = layers.SimpleEmbeddingLayer(params)
       expected_fprop_mode = fprop_mode
       if expected_fprop_mode is None:
-        expected_fprop_mode = 'matmul' if use_matmul else 'loop'
+        expected_fprop_mode = 'matmul' if use_matmul else 'gather'
       self.assertEqual(emb_layer._fprop_mode, expected_fprop_mode)
 
       emb_matrix = emb_layer.vars.wm
@@ -1182,6 +1829,55 @@ class EmbeddingLayerTest(tf.test.TestCase):
   def testSimpleEmbeddingLayerGather(self):
     self._testSimpleEmbeddingLayer(False, False, 'gather')
 
+  def testSimpleEmbeddingLayerMasked(self):
+    g = tf.Graph()
+    with g.as_default():
+      tf.set_random_seed(398847392)
+      params = layers.SimpleEmbeddingLayer.Params()
+      params.name = 'emd'
+      params.dtype = tf.float32
+      params.vocab_size = 10
+      params.embedding_dim = 5
+      params.fprop_mode = 'gather'
+      params.use_3d_weight_tensor = False
+      params.params_init = py_utils.WeightInit.Gaussian(0.01)
+      params.vn.global_vn = False
+      params.vn.per_step_vn = False
+      params.apply_pruning = True
+
+      emb_layer = layers.SimpleEmbeddingLayer(params)
+      emb_matrix = emb_layer.vars.wm
+      ids = tf.constant([[1], [2]])
+      outputs = emb_layer.EmbLookupDefaultTheta(ids)
+
+      self.assertTrue('wm' in emb_layer.vars.wm.name)
+      self.assertTrue('mask' in emb_layer.vars.mask.name)
+      self.assertTrue('threshold' in emb_layer.vars.threshold.name)
+
+      self.assertEqual(emb_layer.theta.wm.get_shape(), tf.TensorShape([10, 5]))
+      self.assertEqual(emb_layer.theta.mask.get_shape(), tf.TensorShape([10,
+                                                                         5]))
+      self.assertEqual(emb_layer.theta.threshold.get_shape(),
+                       tf.TensorShape([]))
+
+      embedding_var_count = 1
+      wts = tf.get_collection('SimpleEmbeddingLayer_vars')
+      self.assertEqual(embedding_var_count, len(wts))
+
+      embedding_mask_count = 1
+      masks = tf.get_collection('masks')
+      self.assertEqual(embedding_mask_count, len(masks))
+
+      emebdding_threshold_count = 1
+      threshold = tf.get_collection('thresholds')
+      self.assertEqual(emebdding_threshold_count, len(threshold))
+
+    with self.session(use_gpu=False, graph=g) as sess:
+      tf.global_variables_initializer().run()
+      emb_matrix_val, _, outputs_val = sess.run([emb_matrix, ids, outputs])
+
+      self.assertAllClose(emb_matrix_val[1:3], outputs_val[:, 0, :])
+
   def _testSimpleEmbeddingLayerGrad(self, use_matmul, use_3d_weight_tensor):
     g = tf.Graph()
     with g.as_default():
@@ -1203,9 +1899,17 @@ class EmbeddingLayerTest(tf.test.TestCase):
       embs_sum = tf.reduce_sum(embs)
       emb_weight = emb_layer.vars.wm
       emb_grad, = tf.gradients(ys=[embs_sum], xs=[emb_weight])
-    with self.session(use_gpu=True, graph=g):
+    with self.session(use_gpu=True, graph=g) as sess:
       tf.global_variables_initializer().run()
-      emb_grad_val = emb_grad.eval()
+      emb_grad_val = sess.run(emb_grad)
+
+    if not use_matmul:
+      # tf.embedding_lookup's gradient is a sparse representation.
+      # For testing, we convert it to a dense representation.
+      o_grad_matrix = np.zeros((8000, 128))
+      for i in range(emb_grad_val.indices.shape[0]):
+        o_grad_matrix[emb_grad_val.indices[i], :] += emb_grad_val.values[i, :]
+      emb_grad_val = o_grad_matrix
 
     expected_emb_grad = np.zeros(shape=(8000, 128))
     expected_emb_grad[89, :] = 0.8
@@ -1271,14 +1975,7 @@ class EmbeddingLayerTest(tf.test.TestCase):
           [simple_outs, simple_grad, original_outs, original_grad],
           feed_dict={ids: ids_val})
       self.assertAllClose(s_outs, o_outs)
-
-      # tf.embedding_lookup's gradient is a sparse representation.
-      # For testing, we convert it to a dense representation.
-      self.assertAllEqual(ids_val, o_grad.indices)
-      o_grad_matrix = np.zeros((classes, dims))
-      for i in range(o_grad.indices.shape[0]):
-        o_grad_matrix[o_grad.indices[i], :] += o_grad.values[i, :]
-      self.assertAllClose(s_grad, o_grad_matrix)
+      self.assertAllClose(s_grad, o_grad)
 
   def testPositionalEmbeddingLayer(self):
     with self.session(use_gpu=False) as sess:
@@ -1412,7 +2109,8 @@ class SoftmaxLayerTest(tf.test.TestCase):
                             training_step=-1,
                             seed=None,
                             dtype=tf.float32,
-                            fprop_dtype=None):
+                            fprop_dtype=None,
+                            apply_pruning=False):
     if fprop_dtype is None:
       fprop_dtype = dtype
     with self.session(use_gpu=True, graph=tf.Graph()) as sess:
@@ -1440,6 +2138,7 @@ class SoftmaxLayerTest(tf.test.TestCase):
       params.num_classes = 32
       params.num_shards = num_shards
       params.chunk_size = chunk_size
+      params.apply_pruning = apply_pruning
       params.params_init = py_utils.WeightInit.Gaussian(0.5, 123456)
 
       if default_qdomain is not None:
@@ -1476,6 +2175,100 @@ class SoftmaxLayerTest(tf.test.TestCase):
         if step_op:
           sess.run([step_op])
       return sess.run(xent_loss)
+
+  def testSimpleFullSoftmaxMasked(self):
+    num_shards = 2
+    apply_pruning = True
+    params = layers.SimpleFullSoftmax.Params()
+    params.name = 'softmax'
+    params.dtype = tf.float32
+    params.input_dim = 10
+    params.num_classes = 32
+    params.fprop_dtype = tf.float32
+    params.num_shards = num_shards
+    params.apply_pruning = apply_pruning
+    softmax_layer = layers.SimpleFullSoftmax(params)
+
+    self.assertTrue('weight_0' in softmax_layer.vars.weight_0.name)
+    self.assertTrue('weight_1' in softmax_layer.vars.weight_1.name)
+    self.assertTrue('mask_0' in softmax_layer.vars.mask_0.name)
+    self.assertTrue('mask_1' in softmax_layer.vars.mask_1.name)
+    self.assertTrue('threshold_0' in softmax_layer.vars.threshold_0.name)
+    self.assertTrue('threshold_1' in softmax_layer.vars.threshold_1.name)
+
+    self.assertEqual(softmax_layer.theta.weight_0.get_shape(),
+                     tf.TensorShape([10, 16]))
+    self.assertEqual(softmax_layer.theta.weight_1.get_shape(),
+                     tf.TensorShape([10, 16]))
+    self.assertEqual(softmax_layer.theta.mask_0.get_shape(),
+                     tf.TensorShape([10, 16]))
+    self.assertEqual(softmax_layer.theta.mask_1.get_shape(),
+                     tf.TensorShape([10, 16]))
+    self.assertEqual(softmax_layer.theta.threshold_0.get_shape(),
+                     tf.TensorShape([]))
+    self.assertEqual(softmax_layer.theta.threshold_0.get_shape(),
+                     tf.TensorShape([]))
+
+    softmax_var_count = 4  # 2 each for weights and biases (we have 2 shards)
+    wts = tf.get_collection('SimpleFullSoftmax_vars')
+    self.assertEqual(softmax_var_count, len(wts))
+
+    softmax_mask_count = 2
+    masks = tf.get_collection('masks')
+    self.assertEqual(softmax_mask_count, len(masks))
+
+    softmax_threshold_count = 2
+    threshold = tf.get_collection('thresholds')
+    self.assertEqual(softmax_threshold_count, len(threshold))
+
+    # Sampled and Masked
+    xent_loss = self._RunSimpleFullSoftmax(
+        num_samples=32, seed=12345, apply_pruning=True)
+    loss = xent_loss.total_xent
+    log_perplexity = xent_loss.avg_xent
+    self.assertNear(loss, 8.701365, 1e-5)
+    self.assertNear(log_perplexity, 3.955166, 1e-5)
+
+    # Sharded and Masked
+    xent_loss = self._RunSimpleFullSoftmax(num_shards=2, apply_pruning=True)
+    loss = xent_loss.total_xent
+    log_perplexity = xent_loss.avg_xent
+    self.assertNear(loss, 6.14888, 1e-5)
+    self.assertNear(log_perplexity, 2.79495, 1e-5)
+
+    # Non_2D and Masked
+    xent_loss = self._RunSimpleFullSoftmax(
+        inputs=np.random.rand(4, 3, 10),
+        class_weights=np.ones((4, 3)),
+        class_ids=np.random.randint(32, size=(4, 3)),
+        apply_pruning=True)
+    self.assertEqual(xent_loss.logits.shape, (4, 3, 32))
+    self.assertEqual(xent_loss.per_example_xent.shape, (4, 3))
+    self.assertEqual(xent_loss.per_example_weight.shape, (4, 3))
+
+    xent_loss = self._RunSimpleFullSoftmax(
+        inputs=np.random.rand(4, 3, 10),
+        class_weights=np.ones((4, 3)),
+        class_probabilities=np.random.uniform(size=(4, 3, 32)),
+        apply_pruning=True)
+    self.assertEqual(xent_loss.logits.shape, (4, 3, 32))
+    self.assertEqual(xent_loss.per_example_xent.shape, (4, 3))
+    self.assertEqual(xent_loss.per_example_weight.shape, (4, 3))
+
+    # Chunked and Masked
+    for chunk_size in (0, 1, 2, 3, 4, 5):
+      print('chunk_size = ', chunk_size)
+      xent_output = self._RunSimpleFullSoftmax(
+          chunk_size=chunk_size, apply_pruning=True)
+      loss = xent_output.total_xent
+      log_perplexity = xent_output.avg_xent
+      print('xent_output ', xent_output)
+      print('xent_output.per_example_argmax.dtype ',
+            xent_output.per_example_argmax.dtype)
+      self.assertAllClose(loss, 6.22425)
+      self.assertAllClose(log_perplexity, 2.82920)
+      self.assertAllEqual(xent_output.per_example_argmax,
+                          np.argmax(xent_output.logits, axis=1))
 
   def testSimpleFullSoftmax_Sampled(self):
     xent_loss = self._RunSimpleFullSoftmax(num_samples=32, seed=12345)
@@ -1702,11 +2495,11 @@ class FeedForwardNetTest(tf.test.TestCase):
       p = layers.FeedForwardNet.Params().Set(
           name='ffn',
           input_dim=10,
-          dropout_prob=0.5,
           hidden_layer_dims=[20, 30],
           batch_norm=True,
           activation='TANH',
           params_init=py_utils.WeightInit.Uniform(1.0))
+      p.dropout.keep_prob = 0.5
       proj_l = p.cls(p)
       a = tf.constant(1.0, shape=[20, 10])
       proj_l.FPropDefaultTheta(a)
@@ -1714,11 +2507,14 @@ class FeedForwardNetTest(tf.test.TestCase):
       p = layers.FeedForwardNet.Params().Set(
           name='ffn2',
           input_dim=10,
-          dropout_prob=[0.5, 0.1],
           hidden_layer_dims=[20, 30],
           batch_norm=True,
           activation='TANH',
           params_init=py_utils.WeightInit.Uniform(1.0))
+      p.dropout = [
+          layers.DropoutLayer.Params().Set(keep_prob=0.5),
+          layers.DropoutLayer.Params().Set(keep_prob=0.9)
+      ]
       proj_l = p.cls(p)
       a = tf.constant(1.0, shape=[20, 10])
       proj_l.FPropDefaultTheta(a)
@@ -1726,11 +2522,14 @@ class FeedForwardNetTest(tf.test.TestCase):
       p = layers.FeedForwardNet.Params().Set(
           name='ffn3',
           input_dim=10,
-          dropout_prob=[0.5, 0.1],
           hidden_layer_dims=[20, 30],
           batch_norm=[True, False],
           activation=['TANH', 'RELU'],
           params_init=py_utils.WeightInit.Uniform(1.0))
+      p.dropout = [
+          layers.DropoutLayer.Params().Set(keep_prob=0.5),
+          layers.DropoutLayer.Params().Set(keep_prob=0.9)
+      ]
       proj_l = p.cls(p)
       a = tf.constant(1.0, shape=[20, 10])
       proj_l.FPropDefaultTheta(a)
@@ -1743,7 +2542,6 @@ class FeedForwardNetTest(tf.test.TestCase):
           name='ffn',
           input_dim=10,
           hidden_layer_dims=[20, 30],
-          dropout_prob=0.0,
           batch_norm=False,
           activation=['RELU', 'NONE'])
       params_init = py_utils.WeightInit.Xavier(scale=1.0, seed=837465638)
@@ -1777,81 +2575,6 @@ class FeedForwardNetTest(tf.test.TestCase):
       out1_v, out2_v = sess.run([out1, out2])
       self.assertAllClose(out1_v, out2_v)
 
-  def testFeedForwardNetWithSkipConnections(self):
-    with self.session(use_gpu=False) as sess:
-      tf.set_random_seed(398847392)
-      np.random.seed(12345)
-      p = layers.FeedForwardNet.Params().Set(
-          name='ffn',
-          input_dim=20,
-          hidden_layer_dims=[10, 10, 20, 25],
-          dropout_prob=0.0,
-          batch_norm=True,
-          activation=['RELU', 'RELU', 'RELU', 'RELU'],
-          skip_connections=[None, 'ResNet', 'DenseNet', 'DenseNet'])
-      params_init = py_utils.WeightInit.Xavier(scale=1.0, seed=837465638)
-      p.params_init = params_init
-      feedforward_net = p.cls(p)
-
-      p1 = layers.ProjectionLayer.Params().Set(
-          name='p1',
-          input_dim=20,
-          output_dim=10,
-          activation='NONE',
-          batch_norm=False)
-      p1.params_init = params_init
-      p1_l = p1.cls(p1)
-      p_bn1 = layers.BatchNormLayer.Params().Set(
-          name='p1', dim=10, params_init=params_init)
-      bn1_l = p_bn1.cls(p_bn1)
-
-      p2 = layers.ProjectionLayer.Params().Set(
-          name='p2',
-          input_dim=10,
-          output_dim=10,
-          activation='NONE',
-          batch_norm=False)
-      p2.params_init = params_init
-      p2_l = p2.cls(p2)
-      p_bn2 = layers.BatchNormLayer.Params().Set(
-          name='p2', dim=10, params_init=params_init)
-      bn2_l = p_bn2.cls(p_bn2)
-
-      p3 = layers.ProjectionLayer.Params().Set(
-          name='p3',
-          input_dim=10,
-          output_dim=10,
-          activation='RELU',
-          batch_norm=True)
-      p3.params_init = params_init
-      p3_l = p3.cls(p3)
-
-      p4 = layers.ProjectionLayer.Params().Set(
-          name='p4',
-          input_dim=20,
-          output_dim=5,
-          activation='RELU',
-          batch_norm=True)
-      p4.params_init = params_init
-      p4_l = p4.cls(p4)
-
-      a = tf.constant(np.random.rand(5, 20), dtype=tf.float32)
-      out1 = feedforward_net.FPropDefaultTheta(a)
-      # skip = None
-      l1_proj_out = p1_l.FPropDefaultTheta(a)
-      l1_out = tf.nn.relu(bn1_l.FPropDefaultTheta(l1_proj_out))
-      # skip = ResNet
-      l2_proj_out = tf.add(l1_proj_out, p2_l.FPropDefaultTheta(l1_out))
-      l2_out = tf.nn.relu(bn2_l.FPropDefaultTheta(l2_proj_out))
-      # skip = ResNet
-      l3_out = tf.concat([l2_out, p3_l.FPropDefaultTheta(l2_out)], axis=-1)
-      # skip = DenseNet
-      out2 = tf.concat([l3_out, p4_l.FPropDefaultTheta(l3_out)], axis=-1)
-
-      tf.global_variables_initializer().run()
-      out1_v, out2_v = sess.run([out1, out2])
-      self.assertAllClose(out1_v, out2_v)
-
   def testFeedForwardNetSmokeTest(self):
     with self.session(use_gpu=False):
       tf.set_random_seed(398847392)
@@ -1860,8 +2583,6 @@ class FeedForwardNetTest(tf.test.TestCase):
           name='ffn',
           input_dim=10,
           hidden_layer_dims=[20, 30],
-          dropout_prob=0.0,
-          batch_norm=True,
           activation=['RELU', 'NONE'])
       params_init = py_utils.WeightInit.Xavier(scale=1.0, seed=837465638)
       p.params_init = params_init
@@ -1872,16 +2593,16 @@ class FeedForwardNetTest(tf.test.TestCase):
 
       tf.global_variables_initializer().run()
       # pyformat: disable
-      test_utils.CompareToGoldenSingleFloat(self, -0.000002, out.eval(), atol=1e-5)  # pylint: disable=line-too-long
+      test_utils.CompareToGoldenSingleFloat(self, 8.190775, out.eval(), atol=1e-5)  # pylint: disable=line-too-long
       # pyformat: enable
-      test_utils.CompareToGoldenSingleFloat(self, 126.990379, out_abs.eval())
+      test_utils.CompareToGoldenSingleFloat(self, 36.773586, out_abs.eval())
 
   def testDropoutLayerTrain(self):
     with self.session(use_gpu=True) as sess:
       tf.set_random_seed(3980847392)
       p = layers.DropoutLayer.Params()
       p.keep_prob = 0.5
-      p.seed = 1234
+      p.random_seed = 1234
       p.name = 'dropout'
 
       dl = p.cls(p)
@@ -1898,7 +2619,7 @@ class FeedForwardNetTest(tf.test.TestCase):
       tf.set_random_seed(3980847392)
       p = layers.DropoutLayer.Params()
       p.keep_prob = 0.5
-      p.seed = 1234
+      p.random_seed = 1234
       p.name = 'dropout'
       p.is_eval = True
 

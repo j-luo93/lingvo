@@ -38,34 +38,135 @@ _RANDOM_SEED = 98274
 
 class RNNCellTest(tf.test.TestCase):
 
+  def testGRUCell(self, inline=False, enable_gru_bias=True):
+    with self.session(
+        use_gpu=False, config=py_utils.SessionConfig(inline=inline)):
+      params = rnn_cell.GRUCell.Params()
+      params.name = 'gru_rnn'
+      params.params_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+      params.bias_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+      params.vn.global_vn = False  # do not set variational noise
+      params.vn.per_step_vn = False  # do not set step wise noise
+      params.num_input_nodes = 2
+      params.num_output_nodes = 2
+      params.num_hidden_nodes = 2
+      params.enable_gru_bias = enable_gru_bias
+      params.zo_prob = 0.0
+
+      gru = rnn_cell.GRUCell(params)
+
+      print('gru vars = ', gru.vars)
+      self.assertTrue('w_r' in gru.vars.w_r.name)
+      self.assertTrue('w_u' in gru.vars.w_u.name)
+      self.assertTrue('w_n' in gru.vars.w_n.name)
+
+      if enable_gru_bias:
+        self.assertTrue('b_n' in gru.vars.b_n.name)
+        self.assertTrue('b_r' in gru.vars.b_r.name)
+        self.assertTrue('b_u' in gru.vars.b_u.name)
+
+      self.assertEqual(
+          gru.theta.w_n.get_shape(),
+          tf.TensorShape([
+              params.num_input_nodes + params.num_output_nodes,
+              params.num_hidden_nodes
+          ]))
+      self.assertEqual(
+          gru.theta.w_u.get_shape(),
+          tf.TensorShape([
+              params.num_input_nodes + params.num_output_nodes,
+              params.num_hidden_nodes
+          ]))
+      self.assertEqual(
+          gru.theta.w_r.get_shape(),
+          tf.TensorShape([
+              params.num_input_nodes + params.num_output_nodes,
+              params.num_output_nodes
+          ]))
+
+      if enable_gru_bias:
+        self.assertEqual(gru.theta.b_n.get_shape(),
+                         tf.TensorShape([params.num_hidden_nodes]))
+        self.assertEqual(gru.theta.b_u.get_shape(),
+                         tf.TensorShape([params.num_hidden_nodes]))
+        self.assertEqual(gru.theta.b_r.get_shape(),
+                         tf.TensorShape([params.num_output_nodes]))
+
+      # Start feeding in inputs.
+      np.random.seed(_NUMPY_RANDOM_SEED)
+      inputs = py_utils.NestedMap(
+          act=[tf.constant(np.random.uniform(size=(3, 2)), tf.float32)],
+          padding=tf.zeros([3, 1]))
+      c_values = tf.constant(np.random.uniform(size=(3, 2)), tf.float32)
+      m_values = tf.constant(np.random.uniform(size=(3, 2)), tf.float32)
+      state0 = py_utils.NestedMap(c=c_values, m=m_values)
+      state1, _ = gru.FPropDefaultTheta(state0, inputs)
+
+      # Initialize all the variables, and then run one step.
+      tf.global_variables_initializer().run()
+
+      variable_count = 11 if enable_gru_bias else 8
+      wts = tf.get_collection('GRUCell_vars')
+      self.assertEqual(variable_count, len(wts))
+
+      # pyformat: disable
+      if enable_gru_bias:
+        m_expected = [
+            [-1.206088, 2.558667],
+            [-1.024555, 2.359131],
+            [-1.006608, 2.385566]]
+        c_expected = [
+            [0.726844, 0.932083],
+            [0.537847, 0.932127],
+            [0.536803, 0.967041]]
+      else:
+        m_expected = [
+            [-1.085402, 2.161964],
+            [-0.933972, 1.995606],
+            [-0.892969, 2.059967]]
+        c_expected = [
+            [0.500292, 0.732436],
+            [0.34267, 0.732542],
+            [0.341799, 0.815305]]
+
+      self.assertAllClose(m_expected, state1.m.eval())
+      self.assertAllClose(c_expected, state1.c.eval())
+
   def _testLSTMSimpleHelper(self,
                             inline=False,
                             couple_input_forget_gates=False,
-                            apply_pruning=False):
+                            apply_pruning=False,
+                            enable_lstm_bias=True):
     with self.session(
         use_gpu=False, config=py_utils.SessionConfig(inline=inline)):
       params = rnn_cell.LSTMCellSimple.Params()
       params.name = 'lstm'
       params.output_nonlinearity = True
       params.params_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+      params.bias_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
 
       params.vn.global_vn = False
       params.vn.per_step_vn = False
       params.num_input_nodes = 2
       params.num_output_nodes = 2
       params.couple_input_forget_gates = couple_input_forget_gates
+      params.enable_lstm_bias = enable_lstm_bias
 
       lstm = rnn_cell.LSTMCellSimple(params)
 
       print('lstm vars = ', lstm.vars)
       self.assertTrue('wm' in lstm.vars.wm.name)
-      self.assertTrue('b' in lstm.vars.b.name)
+
+      if enable_lstm_bias:
+        self.assertTrue('b' in lstm.vars.b.name)
 
       num_param_vectors = 6 if couple_input_forget_gates else 8
       self.assertEqual(lstm.theta.wm.get_shape(),
                        tf.TensorShape([4, num_param_vectors]))
-      self.assertEqual(lstm.theta.b.get_shape(),
-                       tf.TensorShape([num_param_vectors]))
+
+      if enable_lstm_bias:
+        self.assertEqual(lstm.theta.b.get_shape(),
+                         tf.TensorShape([num_param_vectors]))
 
       np.random.seed(_NUMPY_RANDOM_SEED)
       inputs = py_utils.NestedMap(
@@ -80,29 +181,49 @@ class RNNCellTest(tf.test.TestCase):
       # Initialize all the variables, and then run one step.
       tf.global_variables_initializer().run()
 
-      variable_count = 2
+      variable_count = 2 if enable_lstm_bias else 1
       wts = tf.get_collection('LSTMCellSimple_vars')
       self.assertEqual(variable_count, len(wts))
 
       # pyformat: disable
       if couple_input_forget_gates:
-        m_expected = [
-            [0.22088, 0.244225],
-            [0.123647, 0.25378],
-            [0.163328, 0.214796]]
-        c_expected = [
-            [0.355682, 0.711696],
-            [0.313728, 0.633475],
-            [0.485248, 0.961122]]
+        if enable_lstm_bias:
+          m_expected = [
+              [0.342635, 0.182102],
+              [0.140832, 0.210234],
+              [0.224034, 0.155077]]
+          c_expected = [
+              [0.499417, 0.701774],
+              [0.278458, 0.697437],
+              [0.51618, 0.964456]]
+        else:
+          m_expected = [
+              [0.22088, 0.244225],
+              [0.123647, 0.25378],
+              [0.163328, 0.214796]]
+          c_expected = [
+              [0.355682, 0.711696],
+              [0.313728, 0.633475],
+              [0.485248, 0.961122]]
       else:
-        m_expected = [
-            [0.095727, 0.476658],
-            [0.04662, 0.180589],
-            [0.001656, 0.374141]]
-        c_expected = [
-            [0.241993, 0.820267],
-            [0.086863, 0.349722],
-            [0.003176, 0.655448]]
+        if enable_lstm_bias:
+          m_expected = [
+              [0.007753, 0.66843],
+              [-0.029904, 0.485617],
+              [-0.026663, 0.654127]]
+          c_expected = [
+              [0.033096, 1.013467],
+              [-0.086807, 0.748031],
+              [-0.08087, 1.04254]]
+        else:
+          m_expected = [
+              [0.095727, 0.476658],
+              [0.04662, 0.180589],
+              [0.001656, 0.374141]]
+          c_expected = [
+              [0.241993, 0.820267],
+              [0.086863, 0.349722],
+              [0.003176, 0.655448]]
       xmw_expected = [
           [-0.74310219, 1.10182762, 0.67478961, 0.62169313, 0.77394271,
            -0.1691505, -0.39185536, 0.87572402],
@@ -113,8 +234,6 @@ class RNNCellTest(tf.test.TestCase):
       # pyformat: enable
       self.assertAllClose(m_expected, state1.m.eval())
       self.assertAllClose(c_expected, state1.c.eval())
-      # print('xmw = ', extras.xmw.eval())
-      # self.assertAllClose(xmw_expected, extras.xmw.eval())
 
   def testLSTMSimple_NoInline(self):
     self._testLSTMSimpleHelper(inline=False)
@@ -127,6 +246,117 @@ class RNNCellTest(tf.test.TestCase):
 
   def testCifgLSTMSimple_Inline(self):
     self._testLSTMSimpleHelper(inline=True, couple_input_forget_gates=True)
+
+  def testLSTMSimple_NoInline_NoBias(self):
+    self._testLSTMSimpleHelper(inline=False, enable_lstm_bias=False)
+
+  def testLSTMSimple_Inline_NoBias(self):
+    self._testLSTMSimpleHelper(inline=True, enable_lstm_bias=False)
+
+  def testCifgLSTMSimple_NoInline_NoBias(self):
+    self._testLSTMSimpleHelper(
+        inline=False, couple_input_forget_gates=True, enable_lstm_bias=False)
+
+  def testCifgLSTMSimple_Inline_NoBias(self):
+    self._testLSTMSimpleHelper(
+        inline=True, couple_input_forget_gates=True, enable_lstm_bias=False)
+
+  def _testQuantizedLSTMSimpleHelper(self, enable_lstm_bias=True):
+    with self.session(
+        use_gpu=False, config=py_utils.SessionConfig(inline=False)):
+      params = rnn_cell.LSTMCellSimple.Params()
+      params.name = 'lstm'
+      params.output_nonlinearity = True
+      params.params_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+      params.bias_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+
+      params.vn.global_vn = False
+      params.vn.per_step_vn = False
+      params.num_input_nodes = 2
+      params.num_output_nodes = 2
+      params.couple_input_forget_gates = False
+      params.enable_lstm_bias = enable_lstm_bias
+
+      cc_schedule = quant_utils.FakeQuantizationSchedule.Params().Set(
+          clip_start_step=0,  # Step 0 is unclipped.
+          clip_end_step=0,
+          quant_start_step=0,
+          start_cap=1.0,
+          end_cap=1.0)
+      params.qdomain.default = quant_utils.SymetricScheduledClipQDomain.Params(
+      ).Set(cc_schedule=cc_schedule.Copy())
+      params.qdomain.c_state = quant_utils.SymetricScheduledClipQDomain.Params(
+      ).Set(cc_schedule=cc_schedule.Copy())
+      params.qdomain.m_state = quant_utils.SymetricScheduledClipQDomain.Params(
+      ).Set(cc_schedule=cc_schedule.Copy())
+      params.qdomain.fullyconnected = (
+          quant_utils.SymetricScheduledClipQDomain.Params().Set(
+              cc_schedule=cc_schedule.Copy()))
+
+      params.cell_value_cap = None
+
+      lstm = rnn_cell.LSTMCellSimple(params)
+
+      print('lstm vars = ', lstm.vars)
+      self.assertTrue('wm' in lstm.vars.wm.name)
+
+      if enable_lstm_bias:
+        self.assertTrue('b' in lstm.vars.b.name)
+
+      num_param_vectors = 8
+      self.assertEqual(lstm.theta.wm.get_shape(),
+                       tf.TensorShape([4, num_param_vectors]))
+
+      if enable_lstm_bias:
+        self.assertEqual(lstm.theta.b.get_shape(),
+                         tf.TensorShape([num_param_vectors]))
+
+      np.random.seed(_NUMPY_RANDOM_SEED)
+      inputs = py_utils.NestedMap(
+          act=[tf.constant(np.random.uniform(size=(3, 2)), tf.float32)],
+          padding=tf.zeros([3, 1]))
+      state0 = py_utils.NestedMap(
+          c=tf.constant(np.random.uniform(size=(3, 2)), tf.float32),
+          m=tf.constant(np.random.uniform(size=(3, 2)), tf.float32))
+
+      state1, _ = lstm.FPropDefaultTheta(state0, inputs)
+
+      # Initialize all the variables, and then run one step.
+      tf.global_variables_initializer().run()
+
+      variable_count = 2 if enable_lstm_bias else 1
+      wts = tf.get_collection('LSTMCellSimple_vars')
+      self.assertEqual(variable_count, len(wts))
+
+      # pyformat: disable
+      if enable_lstm_bias:
+        m_expected = [
+            [0.039524, 0.477746],
+            [0.006711, 0.447337],
+            [0.013737, 0.550308]]
+        c_expected = [
+            [0.148034, 0.783791],
+            [0.019434, 0.714024],
+            [0.041597, 0.982957]]
+      else:
+        m_expected = [
+            [0.092073, 0.459963],
+            [0.048523, 0.182147],
+            [0.038683, 0.372883]]
+        c_expected = [
+            [0.232411, 0.792142],
+            [0.090428, 0.354446],
+            [0.074322, 0.660205]]
+
+      # pyformat: enable
+      self.assertAllClose(m_expected, state1.m.eval())
+      self.assertAllClose(c_expected, state1.c.eval())
+
+  def testQuantizedLSTMSimple_Inline(self):
+    self._testQuantizedLSTMSimpleHelper()
+
+  def testQuantizedLSTMSimple_NoBias(self):
+    self._testQuantizedLSTMSimpleHelper(enable_lstm_bias=False)
 
   def testLSTMSimple_Masked(self):
     with self.session(
@@ -271,8 +501,8 @@ class RNNCellTest(tf.test.TestCase):
           groups=py_utils.SplitRecursively(
               py_utils.NestedMap(
                   c=tf.constant(np.random.uniform(size=(3, 8)), tf.float32),
-                  m=tf.constant(np.random.uniform(size=(
-                      3, 8)), tf.float32)), params.num_groups))
+                  m=tf.constant(np.random.uniform(
+                      size=(3, 8)), tf.float32)), params.num_groups))
 
       state1, _ = lstm.FPropDefaultTheta(state0, inputs)
       self.assertEqual(params.num_groups, len(state1.groups))
@@ -297,23 +527,27 @@ class RNNCellTest(tf.test.TestCase):
       m_expected = [[
           -0.07857136, 0.43932292, 0.11373602, 0.16337454, 0.01618987,
           0.09685542, -0.20168062, 0.52612996
-      ], [
-          0.07929622, 0.18910739, -0.11084013, 0.32307294, 0.03500029,
-          -0.05823045, 0.16963124, 0.27039385
-      ], [
-          0.11623365, 0.38104215, 0.00935007, 0.22124135, -0.17368057,
-          0.10859803, -0.06948104, 0.10925373
-      ]]
+      ],
+                    [
+                        0.07929622, 0.18910739, -0.11084013, 0.32307294,
+                        0.03500029, -0.05823045, 0.16963124, 0.27039385
+                    ],
+                    [
+                        0.11623365, 0.38104215, 0.00935007, 0.22124135,
+                        -0.17368057, 0.10859803, -0.06948104, 0.10925373
+                    ]]
       c_expected = [[
           -0.23670214, 0.66260374, 0.24650344, 0.28946888, 0.03051668,
           0.15143034, -0.52736223, 0.88325077
-      ], [
-          0.16262427, 0.28568456, -0.19542629, 0.52116692, 0.06872599,
-          -0.1123996, 0.31477568, 0.49881396
-      ], [
-          0.19667494, 0.68746102, 0.02078706, 0.30816019, -0.36376655,
-          0.16003416, -0.16141629, 0.16648693
-      ]]
+      ],
+                    [
+                        0.16262427, 0.28568456, -0.19542629, 0.52116692,
+                        0.06872599, -0.1123996, 0.31477568, 0.49881396
+                    ],
+                    [
+                        0.19667494, 0.68746102, 0.02078706, 0.30816019,
+                        -0.36376655, 0.16003416, -0.16141629, 0.16648693
+                    ]]
       out_expected = m_expected
       # pylint: enable=bad-whitespace, line-too-long
       if num_shuffle_shards > 1:
@@ -727,7 +961,13 @@ class RNNCellTest(tf.test.TestCase):
       prev_v = [[0.2, 0.0], [0.1, 0.4], [0.1, 0.5]]
       cur_v = [[0.3, 1.0], [0.0, 2.4], [0.2, 3.4]]
       padding_v = [[1.0], [0.0], [0.0]]
-      new_v = rnn_cell.ZoneOut(
+      params = rnn_cell.LSTMCellSimple.Params()
+      params.name = 'lstm'
+      params.params_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+      params.num_input_nodes = 2
+      params.num_output_nodes = 2
+      lstm = rnn_cell.LSTMCellSimple(params)
+      new_v = lstm._ZoneOut(
           prev_v,
           cur_v,
           padding_v,
@@ -744,7 +984,13 @@ class RNNCellTest(tf.test.TestCase):
       prev_v = [[0.2, 0.0], [0.1, 0.4], [0.1, 0.5]]
       cur_v = [[0.3, 1.0], [0.0, 2.4], [0.2, 3.4]]
       padding_v = [[1.0], [0.0], [0.0]]
-      new_v = rnn_cell.ZoneOut(
+      params = rnn_cell.LSTMCellSimple.Params()
+      params.name = 'lstm'
+      params.params_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+      params.num_input_nodes = 2
+      params.num_output_nodes = 2
+      lstm = rnn_cell.LSTMCellSimple(params)
+      new_v = lstm._ZoneOut(
           prev_v,
           cur_v,
           padding_v,
@@ -761,7 +1007,13 @@ class RNNCellTest(tf.test.TestCase):
       prev_v = [[0.2, 0.0], [0.1, 0.4], [0.1, 0.5]]
       cur_v = [[0.3, 1.0], [0.0, 2.4], [0.2, 3.4]]
       padding_v = [[1.0], [0.0], [0.0]]
-      new_v = rnn_cell.ZoneOut(
+      params = rnn_cell.LSTMCellSimple.Params()
+      params.name = 'lstm'
+      params.params_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+      params.num_input_nodes = 2
+      params.num_output_nodes = 2
+      lstm = rnn_cell.LSTMCellSimple(params)
+      new_v = lstm._ZoneOut(
           prev_v,
           cur_v,
           padding_v,
@@ -879,6 +1131,26 @@ class RNNCellTest(tf.test.TestCase):
     c_expected = [[-0.3667627, 1.03294277, 0.24229962, 0.43976486],
                   [-0.15832338, 1.22740746, 0.19910297, -0.14970526],
                   [-0.57552528, 0.9139322, 0.41805002, 0.58792269]]
+    self.assertAllClose(m_expected, m_v)
+    self.assertAllClose(c_expected, c_v)
+
+  def testLNLSTMCellLean(self):
+    m_v, c_v = self._testLNLSTMCell(rnn_cell.LayerNormalizedLSTMCellLean)
+    m_expected = [[-0.20482419, 0.55676991], [-0.55648255, 0.20511301],
+                  [-0.20482422, 0.55676997]]
+    c_expected = [[0.14834785, 0.3804915], [-0.00927544, 0.38059637],
+                  [-0.01014781, 0.46336061]]
+    self.assertAllClose(m_expected, m_v)
+    self.assertAllClose(c_expected, c_v)
+
+  def testLNLSTMCellLeanProj(self):
+    m_v, c_v = self._testLNLSTMCell(
+        rnn_cell.LayerNormalizedLSTMCellLean, num_hidden_nodes=4)
+    m_expected = [[0.51581347, 0.22646663], [0.56025136, 0.16842051],
+                  [0.58704823, -0.07126484]]
+    c_expected = [[-0.36676273, 1.03294277, 0.24229959, 0.43976486],
+                  [-0.15832338, 1.22740746, 0.19910295, -0.14970522],
+                  [-0.57552516, 0.9139322, 0.41805002, 0.58792269]]
     self.assertAllClose(m_expected, m_v)
     self.assertAllClose(c_expected, c_v)
 
@@ -1083,8 +1355,8 @@ class RNNCellTest(tf.test.TestCase):
   def testQuantizedLSTMCellSimpleHiddenNodes(self):
     m_expected = [[0.382812, 0.296875], [0.164062, 0.171875],
                   [0.3125, -0.039062]]
-    c_expected = [[-0.160339, 0.795929, 0.449707,
-                   0.347534], [-0.049194, 0.548279, -0.060852, -0.106354],
+    c_expected = [[-0.160339, 0.795929, 0.449707, 0.347534],
+                  [-0.049194, 0.548279, -0.060852, -0.106354],
                   [-0.464172, 0.345947, 0.407349, 0.430878]]
     self._testQuantizedLSTMCellSimpleHelper(
         is_inference=False,
@@ -1225,6 +1497,43 @@ class RNNCellTest(tf.test.TestCase):
                     [0.58900255, 0.58398587]]
       c_expected = [[0.45297623, 0.88433027], [0.42112729, 0.47023624],
                     [0.50483131, 0.89583319]]
+      m_v = state1.m.eval()
+      c_v = state1.c.eval()
+      print('m_v', np.array_repr(m_v))
+      print('c_v', np.array_repr(c_v))
+      self.assertAllClose(m_expected, m_v)
+      self.assertAllClose(c_expected, c_v)
+
+  def testSRUCellWithProjection(self):
+    with self.session(use_gpu=False):
+      params = rnn_cell.SRUCell.Params()
+      params.name = 'sru'
+      params.params_init = py_utils.WeightInit.Uniform(1.24, _INIT_RANDOM_SEED)
+      params.num_input_nodes = 2
+      params.num_hidden_nodes = 3
+      params.num_output_nodes = 2
+      params.zo_prob = 0.0
+      params.random_seed = _RANDOM_SEED
+
+      sru = rnn_cell.SRUCell(params)
+
+      np.random.seed(_NUMPY_RANDOM_SEED)
+      inputs = py_utils.NestedMap(
+          act=[tf.constant(np.random.uniform(size=(3, 2)), tf.float32)],
+          padding=tf.zeros([3, 1]))
+      state0 = py_utils.NestedMap(
+          c=tf.constant(np.random.uniform(size=(3, 3)), tf.float32),
+          m=tf.constant(np.random.uniform(size=(3, 2)), tf.float32))
+      state1, _ = sru.FPropDefaultTheta(state0, inputs)
+
+      # Initialize all the variables, and then run one step.
+      tf.global_variables_initializer().run()
+
+      m_expected = [[0.04926362, 0.54914111], [-0.0501487, 0.32742232],
+                    [-0.19329719, 0.28332305]]
+      c_expected = [[-0.101138, 0.8266117, 0.75368524],
+                    [0.31730127, 0.58325875, 0.64149243],
+                    [0.09471729, 0.48504758, 0.53909004]]
       m_v = state1.m.eval()
       c_v = state1.c.eval()
       print('m_v', np.array_repr(m_v))

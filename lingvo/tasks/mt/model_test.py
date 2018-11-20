@@ -45,7 +45,6 @@ class TestInputGenerator(base_input_generator.BaseSequenceInputGenerator):
 
   @classmethod
   def Params(cls):
-    """Defaults params for NmtInput."""
     p = super(TestInputGenerator, cls).Params()
     p.Define('split', True, '')
     return p
@@ -175,6 +174,7 @@ class TransformerModelTest(tf.test.TestCase):
     p.input = self._InputParams()
     p.encoder = self._EncoderParams()
     p.decoder = self._DecoderParams()
+    p.train.learning_rate = 2e-4
     return p
 
   def testConstruction(self):
@@ -198,7 +198,8 @@ class TransformerModelTest(tf.test.TestCase):
         p.fprop_dtype = fprop_dtype
         p.input.dtype = fprop_dtype
       mdl = p.cls(p)
-      mdl.FProp(mdl.theta)
+      input_batch = mdl.GetInputBatch()
+      mdl.FProp(mdl.theta, input_batch)
       loss = mdl.loss
       logp = mdl.eval_metrics['log_pplx'][0]
       tf.global_variables_initializer().run()
@@ -247,16 +248,15 @@ class TransformerModelTest(tf.test.TestCase):
       for _ in range(5):
         vals += [sess.run((loss, logp, mdl.train_op))[:2]]
       print('BProp actual vals = ', vals)
-      expected_vals = [(189.22296, 10.368382), (282.57202, 10.369616),
-                       (142.55638, 10.367737), (139.9939, 10.369918),
-                       (293.08011, 10.374517)]
+      expected_vals = [(189.22296, 10.368382), (282.54092, 10.368474),
+                       (142.48544, 10.362577), (139.91856, 10.364338),
+                       (292.86707, 10.366976)]
       self.assertAllClose(vals, expected_vals)
 
   def testBPropWithAccumComparison(self):
 
     def _SetDefaults(p):
-      p.encoder.random_seed = 12345
-      p.decoder.random_seed = 12345
+      p.random_seed = 12345
       p.decoder.input_dropout_prob = 0.0
       mp = p.encoder.transformer_stack.transparent_merger_tpl
       mp.weighted_merger_dropout_prob = 0.0
@@ -296,7 +296,7 @@ class TransformerModelTest(tf.test.TestCase):
       for _ in range(2):
         sess.run((py_utils.GetOrCreateGlobalStep(), loss, logp, mdl.train_op))
 
-      expected = sess.run(mdl.decoder.softmax.vars['weight_0'])
+      expected = sess.run(mdl.dec.softmax.vars['weight_0'])
 
     with self.session(use_gpu=False, graph=tf.Graph()) as sess:
       tf.set_random_seed(_TF_RANDOM_SEED)
@@ -314,7 +314,7 @@ class TransformerModelTest(tf.test.TestCase):
 
       sess.run((py_utils.GetOrCreateGlobalStep(), loss, logp, mdl.train_op))
 
-      actual = sess.run(mdl.decoder.softmax.vars['weight_0'])
+      actual = sess.run(mdl.dec.softmax.vars['weight_0'])
 
     self.assertAllClose(expected, actual, rtol=1e-2, atol=1e-2)
 
@@ -355,7 +355,8 @@ class TransformerModelTest(tf.test.TestCase):
       tf.set_random_seed(93820985)
       p = self._testParams()
       mdl = p.cls(p)
-      dec_out_dict = mdl.Decode()
+      input_batch = mdl.input_generator.GetPreprocessedInputBatch()
+      dec_out_dict = mdl.Decode(input_batch)
       tf.global_variables_initializer().run()
       dec_out = sess.run(dec_out_dict)
       metrics_dict = mdl.CreateDecoderMetrics()

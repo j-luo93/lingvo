@@ -41,7 +41,7 @@ class MTEncoderV1(base_encoder.BaseEncoder):
 
   @classmethod
   def Params(cls):
-    """Configs for MTEncoderV1."""
+    """Configs for `MTEncoderV1`."""
     p = super(MTEncoderV1, cls).Params()
     p.Define('emb', layers.EmbeddingLayer.Params(), 'Embedding layer params.')
     p.Define('lstm_tpl',
@@ -56,13 +56,10 @@ class MTEncoderV1(base_encoder.BaseEncoder):
     p.Define('dropout_prob', 0.0, 'Prob at which we do dropout.')
     p.Define('unidi_rnn_type', 'func', 'Options: func, native_cudnn. '
              'func: FRNN, native_cudnn: CuDNNLSTM.')
-    p.Define('bidi_rnn_type', 'func', 'Options: func, native_cudnn. '
-             'func: BidirectionalFRNN, '
-             ' native_cudnn: BidirectionalNativeCuDNNLSTM.')
-    p.Define('random_seed', None,
-             'If set, this decides the random seed to apply in various random'
-             ' ops such that this encoder is deterministic. Set this'
-             ' random_seed only for unittests.')
+    p.Define(
+        'bidi_rnn_type', 'func', 'Options: func, native_cudnn. '
+        'func: BidirectionalFRNN, '
+        ' native_cudnn: BidirectionalNativeCuDNNLSTM.')
     p.Define('cc_schedule', None, 'Clipping cap schedule.')
 
     disable_vn = py_utils.VariationalNoiseParams(1.0, False, False)
@@ -139,30 +136,30 @@ class MTEncoderV1(base_encoder.BaseEncoder):
       dropout_p = layers.DropoutLayer.Params().Set(
           name='dropout_layer',
           keep_prob=1.0 - p.dropout_prob,
-          seed=p.random_seed + 84828474 if p.random_seed else None)
+          random_seed=p.random_seed + 84828474 if p.random_seed else None)
       self.CreateChild('dropout', dropout_p)
 
   def ApplyClipping(self, theta, x):
     p = self.params
     if not p.cc_schedule:
       return x
-    cap = self.cc_schedule.CurrentCap(theta.cc_schedule)
+    cap = tf.cast(self.cc_schedule.CurrentCap(theta.cc_schedule), x.dtype)
     return tf.clip_by_value(x, -cap, cap)
 
   def FProp(self, theta, input_batch):
-    """Encodes source as represented by 'inputs' and 'paddings'.
+    """Encodes source as represented by `inputs` and `paddings`.
 
     Args:
-      theta: Named tuple with the weights for all the encoder layers.
-      input_batch: A NestedMap with fields:
-        ids - The inputs tensor. It is expected to be of shape [batch, time]
-        paddings - The paddings tensor. It is expected to be of shape
-             [batch, time].
+      theta: A `.NestedMap` object containing weights' values of this layer and
+        its children layers.
+      input_batch: A `.NestedMap` with fields:
+        - ids: The inputs tensor. It is expected to be of shape [batch, time].
+        - paddings: The paddings tensor. Expected shape [batch, time].
 
     Returns:
-      (outputs, out_paddings, src_segment_id) pair.
-      Outputs is of the shape [time, batch, depth], and out_paddings is of the
-      shape [time, batch]. src_segment_id should have the shape
+      (outputs, out_paddings, src_segment_id) tuple.
+      `outputs` is of the shape [time, batch, depth], and `out_paddings` is of
+      the shape [time, batch]. `src_segment_id` should have the shape
       [time, batch] if packed inputs are supported by the model (and all
       layers), or None otherwise.
     """
@@ -209,7 +206,7 @@ class MTEncoderUniRNN(base_encoder.BaseEncoder):
 
   @classmethod
   def Params(cls):
-    """Configs for MTEncoderUniRNN."""
+    """Configs for `MTEncoderUniRNN`."""
     p = super(MTEncoderUniRNN, cls).Params()
     p.Define('emb', layers.EmbeddingLayer.Params(), 'Embedding layer params.')
     p.Define('lstm_tpl', rnn_cell.LSTMCellSimple.Params(),
@@ -222,11 +219,6 @@ class MTEncoderUniRNN(base_encoder.BaseEncoder):
     p.Define(
         'unidi_rnn_type', 'func', 'Options: func, native_cudnn. '
         'func: FRNN, native_cudnn: CuDNNLSTM.')
-    p.Define(
-        'random_seed', None,
-        'If set, this decides the random seed to apply in various random'
-        ' ops such that this encoder is deterministic. Set this'
-        ' random_seed only for unittests.')
     p.Define('cc_schedule', None, 'Clipping cap schedule.')
 
     p.Define('is_transparent', False,
@@ -283,14 +275,13 @@ class MTEncoderUniRNN(base_encoder.BaseEncoder):
       dropout_p = layers.DropoutLayer.Params().Set(
           name='dropout_layer',
           keep_prob=1.0 - p.dropout_prob,
-          seed=p.random_seed + 827366448 if p.random_seed else None)
+          random_seed=p.random_seed + 827366448 if p.random_seed else None)
       self.CreateChild('dropout', dropout_p)
 
       if p.is_transparent:
         transparent_params = p.transparent_merger_tpl.Copy()
         transparent_params.name = 'transparent'
         transparent_params.num_sources = p.num_lstm_layers
-        transparent_params.random_seed = p.random_seed
         self.CreateChild('transparent_merger', transparent_params)
 
   def ApplyClipping(self, theta, x):
@@ -300,22 +291,6 @@ class MTEncoderUniRNN(base_encoder.BaseEncoder):
       return x
 
   def FProp(self, theta, input_batch):
-    """Encodes source as represented by 'inputs' and 'paddings'.
-
-    Args:
-      theta: Named tuple with the weights for all the encoder layers.
-      input_batch: A NestedMap with fields:
-        ids - The inputs tensor. It is expected to be of shape [batch, time]
-        paddings - The paddings tensor. It is expected to be of shape
-             [batch, time].
-
-    Returns:
-      (outputs, out_paddings, src_segment_id) pair.
-      Outputs is of the shape [time, batch, depth], and out_paddings is of the
-      shape [time, batch]. src_segment_id should have the shape
-      [time, batch] if packed inputs are supported by the model (and all
-      layers), or None otherwise.
-    """
     p = self.params
     src_segment_id = None
     with tf.name_scope(p.name):
@@ -356,7 +331,7 @@ class MTEncoderBiRNN(base_encoder.BaseEncoder):
 
   @classmethod
   def Params(cls):
-    """Configs for MTEncoderBiRNN."""
+    """Configs for `MTEncoderBiRNN`."""
     p = super(MTEncoderBiRNN, cls).Params()
     p.Define('emb', layers.EmbeddingLayer.Params(), 'Embedding layer params.')
     p.Define('lstm_tpl',
@@ -370,13 +345,10 @@ class MTEncoderBiRNN(base_encoder.BaseEncoder):
     p.Define('residual_start', 2,
              'Layer at which we start residual connections.')
     p.Define('encoder_out_dim', 1024, 'Depth of the encoder output.')
-    p.Define('bidi_rnn_type', 'func', 'Options: func, native_cudnn. '
-             'func: BidirectionalFRNN, '
-             ' native_cudnn: BidirectionalNativeCuDNNLSTM.')
-    p.Define('random_seed', None,
-             'If set, this decides the random seed to apply in various random'
-             ' ops such that this encoder is deterministic. Set this'
-             ' random_seed only for unittests.')
+    p.Define(
+        'bidi_rnn_type', 'func', 'Options: func, native_cudnn. '
+        'func: BidirectionalFRNN, '
+        ' native_cudnn: BidirectionalNativeCuDNNLSTM.')
     p.Define('cc_schedule', None, 'Clipping cap schedule.')
 
     p.Define('is_transparent', False,
@@ -457,14 +429,13 @@ class MTEncoderBiRNN(base_encoder.BaseEncoder):
       dropout_p = layers.DropoutLayer.Params().Set(
           name='dropout_layer',
           keep_prob=1.0 - p.dropout_prob,
-          seed=p.random_seed + 827366448 if p.random_seed else None)
+          random_seed=p.random_seed + 827366448 if p.random_seed else None)
       self.CreateChild('dropout', dropout_p)
 
       if p.is_transparent:
         transparent_params = p.transparent_merger_tpl.Copy()
         transparent_params.name = 'transparent'
         transparent_params.num_sources = p.num_lstm_layers
-        transparent_params.random_seed = p.random_seed
         self.CreateChild('transparent_merger', transparent_params)
 
   def ApplyClipping(self, theta, x):
@@ -474,22 +445,6 @@ class MTEncoderBiRNN(base_encoder.BaseEncoder):
       return x
 
   def FProp(self, theta, input_batch):
-    """Encodes source as represented by 'inputs' and 'paddings'.
-
-    Args:
-      theta: Named tuple with the weights for all the encoder layers.
-      input_batch: A NestedMap with fields:
-        ids - The inputs tensor. It is expected to be of shape [batch, time]
-        paddings - The paddings tensor. It is expected to be of shape
-             [batch, time].
-
-    Returns:
-      (outputs, out_paddings, src_segment_id) pair.
-      Outputs is of the shape [time, batch, depth], and out_paddings is of the
-      shape [time, batch]. src_segment_id should have the shape
-      [time, batch] if packed inputs are supported by the model (and all
-      layers), or None otherwise.
-    """
     p = self.params
     with tf.name_scope(p.name):
       inputs = py_utils.with_dependencies([
@@ -546,7 +501,7 @@ class TransformerEncoder(base_encoder.BaseEncoder):
 
   @classmethod
   def Params(cls):
-    """Configs for TransformerEncoder."""
+    """Configs for `TransformerEncoder`."""
     p = super(TransformerEncoder, cls).Params()
 
     # Embedding related
@@ -567,10 +522,6 @@ class TransformerEncoder(base_encoder.BaseEncoder):
 
     p.Define('model_dim', 1024, 'Characteristic depth (dimension).')
     p.Define('input_dropout_prob', 0.0, 'Prob at which we do input dropout.')
-    p.Define('random_seed', None,
-             'If set, this decides the random seed to apply in various random'
-             ' ops such that this encoder is deterministic. Set this'
-             ' random_seed only for unittests.')
 
     p.Define('transformer_stack', mt_layers.TransformerStack.Params(),
              'TransformerStack layer params.')
@@ -607,31 +558,29 @@ class TransformerEncoder(base_encoder.BaseEncoder):
 
       dropout_tpl = layers.DropoutLayer.Params()
       dropout_tpl.keep_prob = (1.0 - p.input_dropout_prob)
-      dropout_tpl.seed = p.random_seed
       self.CreateChild('input_dropout', dropout_tpl)
 
     p.transformer_stack.name = p.name
-    p.transformer_stack.random_seed = p.random_seed
     self.CreateChild('transformer_stack', p.transformer_stack)
 
   def FProp(self, theta, input_batch):
     """Embeds source ids and transforms with TransformerStack.
 
     Args:
-      theta: A nested map object containing weights' values of this
+      theta: A `.NestedMap` object containing weights' values of this
         layer and its children layers.
-      input_batch: A NestedMap with fields:
-        ids - The inputs tensor. It is expected to be of shape [batch, time]
-        paddings - The paddings tensor. It is expected to be of shape
-             [batch, time].
+      input_batch: A `.NestedMap` with fields:
+
+        - ids: The inputs tensor. It is expected to be of shape [batch, time].
+        - paddings: The paddings tensor. Expected shape [batch, time].
 
     Returns:
-      (outputs, out_paddings, src_segment_id) pair. Outputs is of the shape
-      [time, batch, depth], and out_paddings is of the shape [time, batch]
-      outputs can be a list of output tensors if is_transparent is set in
-      transformer_stack. src_segment_id should
-      have the shape [time, batch] if packed inputs are supported by the model
-      (and all layers), or None otherwise.
+      (outputs, out_paddings, src_segment_id) tuple. `outputs` is of the shape
+      [time, batch, depth], and `out_paddings` has shape [time, batch].
+      `outputs` can be a list of output tensors if is_transparent is set in
+      transformer_stack. `src_segment_id` should have the shape [time, batch]
+      if packed inputs are supported by the model (and all layers), or None
+      otherwise.
     """
     p = self.params
     with tf.name_scope(p.name):

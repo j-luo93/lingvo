@@ -26,7 +26,8 @@ Cluster = cluster._Cluster
 def Current():
   """Returns the current cluster specification.
 
-  E.g.,
+  E.g.::
+
     with Cluster(cluster_params) as foo:
       model = p.cls(p)
       model.FProp()  # FProp can access foo through cluster_factory.Current().
@@ -38,8 +39,12 @@ def Current():
     return stack[-1]
 
 
-def ForTestingWorker(mode=None, job=None, gpus=None, split_size=None,
-                     tpus=None):
+def ForTestingWorker(mode=None,
+                     job=None,
+                     gpus=None,
+                     split_size=None,
+                     tpus=None,
+                     add_summary=None):
   """Returns a Cluster for unittesting with a worker."""
   p = Cluster.Params()
   if mode:
@@ -52,4 +57,6 @@ def ForTestingWorker(mode=None, job=None, gpus=None, split_size=None,
     p.worker.tpus_per_replica = tpus
   if split_size:
     p.worker.devices_per_split = split_size
+  if add_summary:
+    p.add_summary = add_summary
   return p.cls(p)

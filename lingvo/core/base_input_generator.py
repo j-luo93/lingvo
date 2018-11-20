@@ -26,14 +26,13 @@ from tensorflow.contrib.tpu.python.tpu import tpu_function
 from tensorflow.python.framework import function
 from tensorflow.python.ops import io_ops
 from lingvo.core import base_layer
-from lingvo.core import cluster_factory
 from lingvo.core import input_generator_helper as ig_helper
 from lingvo.core import py_utils
 from lingvo.core import tokenizers
 from lingvo.core.ops import py_x_ops
 
 
-class BaseInputGenerator(base_layer.LayerBase):
+class BaseInputGenerator(base_layer.BaseLayer):
   """The base input generator."""
 
   @classmethod
@@ -42,7 +41,6 @@ class BaseInputGenerator(base_layer.LayerBase):
     p = super(BaseInputGenerator, cls).Params()
     p.name = 'input'
     p.Define('batch_size', 0, 'Batch size.')
-    p.Define('random_seed', None, 'Random seed used for input sampling.')
     p.Define(
         'num_samples', 0,
         'If non-zero, the dataset contains these many samples. '
@@ -61,15 +59,27 @@ class BaseInputGenerator(base_layer.LayerBase):
   def __init__(self, params):
     super(BaseInputGenerator, self).__init__(params)
     self._made_tpu_infeed = False
+    # parameter to tell the bprop one hot for all the files.
+    self._bprop_onehot = tf.constant([1], dtype=tf.float32)
+    # Each entry is a regular expression specifying the set of variables
+    # to bprop per data source.
+    self._bprop_variable_filters = ['']
 
   def CommonInputOpArgs(self):
     """Common input params."""
     return {}
 
+  def GetBpropVariableFilters(self):
+    return self._bprop_variable_filters
+
+  def GetInputSourceOneHot(self):
+    """Get the current bprop type of the input generator batch."""
+    return self._bprop_onehot
+
   def InputBatchSize(self):
     """Returns the batch size for the current step."""
     p = self.params
-    cluster = cluster_factory.Current()
+    cluster = self.cluster
 
     # If use_per_host_infeed, each input op is only responsible
     # for generating a subset of the whole batch.
@@ -85,10 +95,10 @@ class BaseInputGenerator(base_layer.LayerBase):
     """The current input batch, not preprocessed.
 
     This is meant to be overridden by subclasses, but not called directly.
-    Callers should use GetPreprocessedInputBatch().
+    Callers should use `GetPreprocessedInputBatch()`.
 
     Returns:
-      A NestedMap of input tensors. Each tensor's dim-0 must be the same
+      A `.NestedMap` of input tensors. Each tensor's dim-0 must be the same
       and denotes the batch dimension.
     """
     raise NotImplementedError('Abstract method')
@@ -103,7 +113,7 @@ class BaseInputGenerator(base_layer.LayerBase):
   def CreateTpuFeeds(self):
     """Creates the TPU infeed queue from preprocessed batch."""
     p = self.params
-    cluster = cluster_factory.Current()
+    cluster = self.cluster
     num_tpu_hosts = cluster.num_tpu_hosts
     assert num_tpu_hosts > 0, ('num_tpu_hosts: %d' % num_tpu_hosts)
     num_infeed_hosts = num_tpu_hosts if p.use_per_host_infeed else 1
@@ -147,7 +157,7 @@ class BaseInputGenerator(base_layer.LayerBase):
               if device_assignment:
                 # We put both enqueue/dequeue ops at core 0 in each replica.
                 replica = device_assignment.lookup_replicas(
-                    task_id, (0, 0, 0))[shard_index_in_host]  # pylint: disable=cell-var-from-loop
+                    task_id, 0)[shard_index_in_host]  # pylint: disable=cell-var-from-loop
                 return device_assignment.tpu_ordinal(replica=replica)
               else:
                 return shard_index_in_host
@@ -180,7 +190,7 @@ class BaseInputGenerator(base_layer.LayerBase):
       num_splits: The number of splits.
 
     Returns:
-      A list of NestedMaps. Each NestedMap represents the input
+      A list of `.NestedMap`. Each `.NestedMap` represents the input
       tensors in one split.
     """
     assert num_splits >= 1
@@ -210,8 +220,9 @@ class BaseInputGeneratorFromFiles(BaseInputGenerator):
     p = super(BaseInputGeneratorFromFiles, cls).Params()
     p.Define(
         'file_pattern', '',
-        'A single file pattern string or a list <file_pattern, weight> pairs.'
-        'In the later case, probablistic samples are from the inputs '
+        'A single file pattern string, a list of <file_pattern, weight> pairs'
+        'or a list of  <file_pattern, weight, bprop_variable_filter> tuples.'
+        'In the later 2 cases, probablistic samples are from the inputs '
         'proportional to their weights. Typically, values are binary '
         'protocol buffers containing train/eval samples. Keys are not used.')
     p.Define('file_random_seed', 301,
@@ -228,6 +239,13 @@ class BaseInputGeneratorFromFiles(BaseInputGenerator):
     p.Define('num_batcher_threads', 1, 'Number of threads to use for input '
              'record batcher.')
     return p
+
+  @base_layer.initializer
+  def __init__(self, params):
+    super(BaseInputGeneratorFromFiles, self).__init__(params)
+    if self.params.use_per_host_infeed and self.params.file_random_seed != 0:
+      raise ValueError('file_random_seed needs to be 0 when '
+                       'use_per_host_infeed == True.')
 
   def CommonInputOpArgs(self):
     """Common input params."""
@@ -249,32 +267,31 @@ class BaseInputGeneratorFromFiles(BaseInputGenerator):
     return args
 
   def _InputOpBucketingArgs(self):
-    p = self.params
     return {
         'bucket_upper_bound': [1000000000],
         'bucket_batch_limit': [self.InputBatchSize()],
     }
 
   def _DataSourceFromFilePattern(self, file_pattern):
-    """"Read and return input batch from a string file_pattern.
+    """Read and return input batch from a string file_pattern.
 
     Args:
       file_pattern: A string file pattern.
 
     Returns:
-      A tf.Tensor or nested map of tf.Tensor
+      A tf.Tensor or `.NestedMap` of tf.Tensor
     """
     raise NotImplementedError()
 
   def _BuildDataSource(self):
-    """"Read and return input batch from p.file_pattern.
+    """Read and return input batch from `p.file_pattern`.
 
-    p.file_pattern may be a string file_pattern or a
-    list of <file_pattern, weight> pairs.
+    `p.file_pattern` may be a string file_pattern or a
+    list of (file_pattern, weight) pairs.
 
     Returns:
-      A tf.Tensor or nested map of tf.Tensor same
-      as self._DataSourceFromFilePattern()
+      A tf.Tensor or `.NestedMap` of tf.Tensor same as
+      `self._DataSourceFromFilePattern()`.
 
     Raises:
       ValueError: If unknown token type.
@@ -291,10 +308,17 @@ class BaseInputGeneratorFromFiles(BaseInputGenerator):
         # lambda to make sure that the record is drawn from data source
         # only if it will be used.
         return lambda: self._DataSourceFromFilePattern(file_pattern)
-
-      data_source = py_utils.MixByWeight(
-          (_MakeDataSourceFromFilePatternFunc(file_pattern), weight)
-          for file_pattern, weight in input_file_pattern)
+      inputs = []
+      weights = []
+      self._bprop_variable_filters = []
+      for input_entry in input_file_pattern:
+        file_pattern, weight = input_entry[:2]
+        inputs.append(_MakeDataSourceFromFilePatternFunc(file_pattern))
+        weights.append(weight)
+        bprop_variable_filter = input_entry[2] if len(input_entry) > 2 else ''
+        self._bprop_variable_filters.append(bprop_variable_filter)
+      data_source, selected_bprop = py_utils.MixByWeight(inputs, weights)
+      self._bprop_onehot = selected_bprop
     else:
       raise ValueError()
     return data_source
@@ -322,7 +346,7 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
              'The maximum length of the target sequence.')
     p.Define('pad_to_max_seq_length', False,
              'If True, input tensors will be padded to max_length.')
-    p.Define('tokenizer', tokenizers.SimpleTokenizer.Params(),
+    p.Define('tokenizer', tokenizers.AsciiTokenizer.Params(),
              'Tokenizer params.')
     p.Define(
         'tokenizer_dict', {},
@@ -356,7 +380,7 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
   def scaled_bucket_batch_limit(self):
     p = self.params
     if not hasattr(self, '_scaled_bucket_batch_limit'):
-      cluster = cluster_factory.Current()
+      cluster = self.cluster
       self._scaled_bucket_batch_limit = [
           b * cluster.num_splits_per_client for b in p.bucket_batch_limit
       ]
@@ -390,26 +414,27 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
 
     Args:
       strs: A vector of strings.
-      is_source: A bool to indicate whether to use source_max_length to pad
+      is_source: A bool to indicate whether to use `source_max_length` to pad
         'strs'.
       external_max_length: An int providing the max_length for strs.
       external_append_eos: Bool or None. If None, will be ignored and
-        params.append_eos will be used. If bool, will determine if an eos
+        `params.append_eos` will be used. If bool, will determine if an eos
         symbol will be added to tokens.
       key: A string key in case the model has multiple tokenizers.
 
     Returns:
-      (ids, labels, paddings): Tensors with the same shape [batch, maxlen].
-      ids[i, j] is the input token id of i-th sample for j-th step.
-      labels[i, j] is the target token id of i-th sample for j-th step.
-      paddings[i, j] is 1 iff i-th sample's j-th step is padded.
+      A tuple (ids, labels, paddings) with the same shape [batch, maxlen].
+
+      - ids[i, j] is the input token id of i-th sample for j-th step.
+      - labels[i, j] is the target token id of i-th sample for j-th step.
+      - paddings[i, j] is 1 iff i-th sample's j-th step is padded.
 
     Raises:
       ValueError: If unknown token type.
     """
     p = self.params
 
-    if external_max_length:
+    if external_max_length is not None:
       maxlen = external_max_length
     elif is_source:
       maxlen = p.source_max_length
@@ -432,7 +457,7 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
       key: A string key in case the model has multiple tokenizers.
 
     Returns:
-      sequences: A vector of shape [batch]. The converted string sequence.
+      sequences - A vector of shape [batch]. The converted string sequence.
 
     Raises:
       ValueError: If unknown token type.
@@ -444,12 +469,12 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
 class BaseTinyDatasetInput(BaseInputGenerator):
   """Input generator for tiny dataset which are stored in tf checkpoint.
 
-  Input batch (b: batch size, h: height, w: width, d: depth):
-    raw: Samples. [b, h, w, d].
-    data: Preprocessed samples. [b, h, w, d].
-    label: Labels. [b].
-    weight: [b]. weight[i] is 1.0 if i-th sample is considered to
-      be a real example. Otherwise, weight[i] is 0.0.
+      | Input batch (b: batch size, h: height, w: width, d: depth):
+      |   raw: Samples. [b, h, w, d].
+      |   data: Preprocessed samples. [b, h, w, d].
+      |   label: Labels. [b].
+      |   weight: [b]. weight[i] is 1.0 if i-th sample is considered to
+      |     be a real example. Otherwise, weight[i] is 0.0.
   """
 
   @classmethod
