@@ -38,6 +38,7 @@ import tensorflow as tf
 
 from lingvo import base_runner
 from tensorflow.core.protobuf import config_pb2
+from tensorflow.python import pywrap_tensorflow
 from lingvo import base_trial
 from lingvo.core import base_model
 from lingvo.core import base_model_params
@@ -110,6 +111,97 @@ tf.flags.DEFINE_bool(
 FLAGS = tf.flags.FLAGS
 
 
+def get_tensors_in_checkpoint_file(file_name,
+                                   tensor_name,
+                                   all_tensors,
+                                   all_tensor_names=False):
+  try:
+    reader = pywrap_tensorflow.NewCheckpointReader(file_name)
+    if all_tensors or all_tensor_names:
+      var_to_shape_map = reader.get_variable_to_shape_map()
+      key_tensor_map = dict()
+      for key in sorted(var_to_shape_map):
+        # print("tensor_name: ", key)
+        if all_tensors:
+          key_tensor_map[key] = reader.get_tensor(key)
+      return key_tensor_map
+    elif not tensor_name:
+      print(reader.debug_string().decode("utf-8"))
+    else:
+      print("tensor_name: ", tensor_name)
+      return reader.get_tensor(tensor_name)
+  except Exception as e:  # pylint: disable=broad-except
+    print(str(e))
+    if "corrupted compressed block contents" in str(e):
+      print("It's likely that your checkpoint file has been compressed "
+            "with SNAPPY.")
+    if ("Data loss" in str(e) and
+        (any([e in file_name for e in [".index", ".meta", ".data"]]))):
+      proposed_file = ".".join(file_name.split(".")[0:-1])
+      v2_file_error_template = """
+It's likely that this is a V2 checkpoint and you need to provide the filename
+*prefix*.  Try removing the '.' and extension.  Try:
+inspect checkpoint --file_name = {}"""
+      print(v2_file_error_template.format(proposed_file))
+      
+def get_initializer(model):
+  try:
+    word_level_ckpt_path = model.params.task.train.word_level_ckpt_path
+  except AttributeError:
+    word_level_ckpt_path = ''
+  if word_level_ckpt_path:
+    all_saved_tensors = get_tensors_in_checkpoint_file(word_level_ckpt_path, '', True)
+    all_model_vars = {t.name.rstrip(':0'): t for t in model.vars.Flatten()}
+    
+    # insert chunk tag embeddings:
+    emb_names = sorted(filter(lambda n: n.startswith('1b_word_level_lm/lm/emb/s/var_'), all_saved_tensors.keys()))
+    n_shards = len(emb_names)
+    assert n_shards == 8
+    concat = np.concatenate([all_saved_tensors[name] for name in emb_names], axis=0)
+    chunk_tag_emb = np.random.uniform(low=-0.05, high=0.05, size=(3, 640))
+    garbage_emb = np.random.uniform(low=-0.05, high=0.05, size=(5, 640)) # garbage appended at the end to make sure it is divided by 8
+    adjusted_emb = np.concatenate([concat[:4], chunk_tag_emb, concat[4:], garbage_emb], axis=0)
+    assert adjusted_emb.shape[0] % 8 == 0
+    adjusted_emb_shards = np.split(adjusted_emb, 8, axis=0)
+    
+    for i, name in enumerate(emb_names):
+      all_saved_tensors[name] = adjusted_emb_shards[i]
+    
+    # add init ops
+    init_ops = list()
+    for name, tensor in all_saved_tensors.iteritems():
+      if name.startswith('1b_word_level_lm'):
+        if name.startswith('1b_word_level_lm/lm/softmax/bias'):
+          tf.logging.warning('Skipped saved tensor %s' %name)
+        elif name.startswith('1b_word_level_lm/lm/rnns'):
+          tf.logging.warning('Skipped saved tensor %s' %name)
+        elif name in all_model_vars:
+          tf.logging.warning('Initialize %s from saved ckpt' %name)
+          init_ops.append(tf.assign(all_model_vars[name], all_saved_tensors[name]))
+        else:
+          tf.logging.warning('%s not found in model vars' %name)
+      else:
+        tf.logging.warning('Skipped saved tensor %s' %name)
+        
+    for name in all_model_vars.keys():
+      if name not in all_saved_tensors:
+        tf.logging.warning('%s not found in saved model' %name)
+    
+    # change params_init for cudnn lstm
+    wb = all_saved_tensors['1b_word_level_lm/lm/rnns_0/wb/var']
+    w_pc = py_utils.WeightParams(
+      shape=wb.shape,
+      init=py_utils.WeightInit.Constant(scale=wb),
+      dtype=tf.float32)
+    model.params.task.lm.rnns.params_init = w_pc
+    tf.logging.warning('Changing lower level cudnn lstm params_init')
+    
+    generic_init_op = tf.tables_initializer()
+    init_ops.insert(0, generic_init_op)
+    return tf.group(*init_ops)
+  else:
+    return tf.tables_initializer()
+
 # useful for debugging.
 def _StartShell(local_ns=None):
   # An interactive shell is useful for debugging/development.
@@ -179,7 +271,7 @@ class Controller(base_runner.BaseRunner):
         self._vars = tf.get_collection(tf.GraphKeys.VARIABLES)
         self._uninitialized = tf.report_uninitialized_variables(self._vars)
         self._initialize_all = tf.global_variables_initializer()
-        self.initialize_tables = tf.tables_initializer()
+        self.initialize_tables = get_initializer(self._model)
         self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
         self.close_queue_ops = tf.get_collection(py_utils.CLOSE_QUEUE_OPS)
 
@@ -358,7 +450,7 @@ class Trainer(base_runner.BaseRunner):
         self._model = self.params.cls(self.params)
         self._params = self._model.params
         self._model.ConstructFPropBPropGraph()
-      self.initialize_tables = tf.tables_initializer()
+      self.initialize_tables = get_initializer(self._model)
       self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
       self.close_queue_ops = tf.get_collection(py_utils.CLOSE_QUEUE_OPS)
       tf.logging.info('Trainer number of enqueue ops: %d',
@@ -511,7 +603,7 @@ class Evaler(base_runner.BaseRunner):
         self._model_task = self._model.GetTask(self._model_task_name)
         self._saver = self._GetSaver()
         self._summary_op = None#tf.summary.merge_all()
-      self.initialize_tables = tf.tables_initializer()
+      self.initialize_tables = get_initializer(self._model)
       # No queues are allowed for eval models.
       self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
       assert not self.enqueue_ops
@@ -676,7 +768,7 @@ class Decoder(base_runner.BaseRunner):
         self._dec_output = self._model_task.Decode()
         self._saver = self._GetSaver()
         self._summary_op = tf.summary.merge_all()
-      self.initialize_tables = tf.tables_initializer()
+      self.initialize_tables = get_initializer(self._model)
       # No queues are allowed for decoder models.
       self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
       assert not self.enqueue_ops

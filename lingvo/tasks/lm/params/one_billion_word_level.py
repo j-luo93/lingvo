@@ -343,6 +343,21 @@ class OneBillionTaggedHRRChunkLevelNF50(OneBillionTaggedHRRWordLevelNF50):
     p.lm.pred_proj.output_dim = cls.EMBEDDING_DIM
     p.lm.pred_proj.activation = 'TANH'
     p.lm.pred_proj.batch_norm = False
+    
+    # p.train.word_level_ckpt_path = '/tmp/lingvo/train/wordHRR/train/ckpt-00000000'
+    # p.train.word_level_ckpt_path = '/tmp/lingvo/from_cloud/nf320/ckpt-00115933'
+    return p
+
+@model_registry.RegisterSingleTaskModel
+class OneBillionTaggedHRRChunkLevelNF320FixedBases(OneBillionTaggedHRRChunkLevelNF50):
+  NUM_FILLERS_PER_ROLE = 320
+
+  @classmethod
+  def Task(cls):
+    p = super(OneBillionTaggedHRRChunkLevelNF320FixedBases, cls).Task()
+    p.lm.emb.trainable_basis = False
+    p.lm.trainable_basis = False
+    p.train.isometric = 0.
     return p
 
 @model_registry.RegisterSingleTaskModel

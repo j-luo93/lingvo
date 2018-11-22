@@ -48,6 +48,7 @@ class LanguageModel(base_model.BaseTask):
         'average across predicted tokens in batch o/w (default).')
     tp.Define('isometric', 0.0, 'Weight for isometric constraint')
     tp.Define('chunk_loss_anneal', 0.0, 'Anneal weight for chunk loss to 1.0 at this many steps')
+    tp.Define('word_level_ckpt_path', '', 'Path load pretrained word level HRRLM.')
 
     tp.lr_schedule = lr_schedule.PiecewiseConstantLearningRateSchedule.Params(
     ).Set(
