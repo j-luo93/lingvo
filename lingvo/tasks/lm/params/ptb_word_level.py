@@ -164,10 +164,10 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     #        boundaries=[], values=[1.0]))
     # tp.lr_schedule = (
     #    lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=100))
-    # tp.lr_schedule.metric_history.local_filesystem = True
-
     p.train.lr_schedule = (
-        lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=100))
+        lr_schedule.DevBasedSchedule.Params().Set(decay=0.8, window=100))
+    tp.lr_schedule.metric_history.local_filesystem = True
+
         # lr_schedule.ExponentialLearningRateSchedule.Params().Set(start=(0, 1.0), limit=(10000, 0.01)))
     # tp.learning_rate = 0.02
     # p.train.optimizer = optimizer.SGD.Params()
@@ -184,7 +184,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p.train.optimizer = optimizer.SGD.Params()
     p.train.learning_rate = 1.0
     #p.train.optimizer = optimizer.Adam.Params()
-    #p.train.learning_rate = 2e-3
+    #p.train.learning_rate = 5e-4#2e-3
 
     # HACK
     # use uniform initializer (-scale, scale)
@@ -250,7 +250,8 @@ class PennBaselineCont(PennBaseline):
     p.train.save_interval_seconds = 200
     p.train.summary_interval_steps = 200
     p.train.lr_schedule = (
-        lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=1000))
+        lr_schedule.DevBasedSchedule.Params().Set(decay=0.8, window=1000))
+    p.train.lr_schedule.metric_history.local_filesystem = True
     return p
 
 # helper function: add some HRR-specific options
@@ -271,7 +272,7 @@ def HRRify(p, cls):
   p.lm.softmax.num_roles = cls.NUM_ROLES
   p.lm.softmax.input_dim *= cls.NUM_ROLES # size: |V| x nr*d
   # dropout for f_noisy
-  p.lm.decoded_filler_keep_prob = 0.5
+  p.lm.decoded_filler_keep_prob = 0.9#5
   #p.lm.rnns.drop_last = False
   # annealing for second role
   p.lm.softmax.role_anneal_steps = [15000]#[3000]
@@ -456,6 +457,18 @@ class PennTaggedHRRChunkLevelNF50(PennTaggedHRRWordLevelNF50):
     p = super(PennTaggedHRRChunkLevelNF50, cls).Task()
     p = chunkify(p, cls)
     # TODO(jmluo) need to rename this -- I'm still using chunk loss but there is no r_o prediction.
+    return p
+
+@model_registry.RegisterSingleTaskModel
+class PennTaggedHRRChunkLevelNF320FixedBases(PennTaggedHRRChunkLevelNF50):
+  NUM_FILLERS_PER_ROLE = 320
+
+  @classmethod
+  def Task(cls):
+    p = super(PennTaggedHRRChunkLevelNF320FixedBases, cls).Task()
+    p.lm.emb.trainable_basis = False
+    p.lm.trainable_basis = False
+    p.train.isometric = 0.
     return p
 
 @model_registry.RegisterSingleTaskModel
