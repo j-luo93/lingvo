@@ -1373,6 +1373,7 @@ class HRREmbeddingLayer(base_layer.LayerBase):
     p.Define('vocab_size', 0, 'Vocabulary size')
     p.Define('actual_shards', -1, 'Actual number of shards used. This should not be specified, but computed during __init__ call')
     p.Define('trainable_basis', True, 'trainable basis embeddings')
+    p.Define('freeze', False, 'Freeze embeddings')
     return p
 
   @base_layer.initializer
@@ -1428,6 +1429,7 @@ class HRREmbeddingLayer(base_layer.LayerBase):
         self.CreateChild('s', p.s)
         self.CreateVariable('F', F_pc)
       elif p.mode == 'basic':
+        #p.s.freeze = p.freeze
         self.CreateChild('s', p.s)
         self.CreateVariable('r', r_pc, trainable=p.trainable_basis)
         self.CreateVariable('F', F_pc, trainable=p.trainable_basis)

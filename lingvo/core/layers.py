@@ -966,6 +966,7 @@ class EmbeddingLayer(base_layer.LayerBase):
     p.Define('max_num_shards', 0, 'Num param shards.')
     p.Define('partition_strategy', 'mod', 'Partition strategy for sharded embeddings')
     p.Define('on_ps', True, 'True if to perform the embedding lookup on ps.')
+    p.Define('freeze', False, 'Freeze embeddings')
     p.Define(
         'scale_sqrt_depth', False, 'If set True, activations are scaled'
         ' with sqrt(embedding_dim) in EmbLookup.')
@@ -1003,7 +1004,7 @@ class EmbeddingLayer(base_layer.LayerBase):
     self._emb_shards = []
     with tf.variable_scope(p.name):
       for i in range(actual_shards):
-        vi, vi_var = py_utils.CreateVariable('var_%d' % i, w_pc)
+        vi, vi_var = py_utils.CreateVariable('var_%d' % i, w_pc, trainable=not p.freeze)
         self._vars.append(vi_var)
         if p.on_ps:
           v = vi_var

@@ -154,15 +154,20 @@ def get_initializer(model):
     all_model_vars = {t.name.rstrip(':0'): t for t in model.vars.Flatten()}
     
     # insert chunk tag embeddings:
-    emb_names = sorted(filter(lambda n: n.startswith('1b_word_level_lm/lm/emb/s/var_'), all_saved_tensors.keys()))
+    prefix = model.params.task.name
+    emb_names = sorted(filter(lambda n: n.startswith('%s/lm/emb/s/var_' %prefix), all_saved_tensors.keys()))
     n_shards = len(emb_names)
-    assert n_shards == 8
+    expected_n_shards = 8 if prefix.startswith('1b') else 1
+    assert n_shards == expected_n_shards
     concat = np.concatenate([all_saved_tensors[name] for name in emb_names], axis=0)
     chunk_tag_emb = np.random.uniform(low=-0.05, high=0.05, size=(3, 640))
-    garbage_emb = np.random.uniform(low=-0.05, high=0.05, size=(5, 640)) # garbage appended at the end to make sure it is divided by 8
-    adjusted_emb = np.concatenate([concat[:4], chunk_tag_emb, concat[4:], garbage_emb], axis=0)
-    assert adjusted_emb.shape[0] % 8 == 0
-    adjusted_emb_shards = np.split(adjusted_emb, 8, axis=0)
+    if prefix.startswith('1b'):
+      garbage_emb = np.random.uniform(low=-0.05, high=0.05, size=(5, 640)) # garbage appended at the end to make sure it is divided by 8
+      adjusted_emb = np.concatenate([concat[:4], chunk_tag_emb, concat[4:], garbage_emb], axis=0)
+    else:
+      adjusted_emb = np.concatenate([concat[:4], chunk_tag_emb, concat[4:-3]], axis=0)
+    assert adjusted_emb.shape[0] % n_shards == 0
+    adjusted_emb_shards = np.split(adjusted_emb, n_shards, axis=0)
     
     for i, name in enumerate(emb_names):
       all_saved_tensors[name] = adjusted_emb_shards[i]
@@ -170,10 +175,10 @@ def get_initializer(model):
     # add init ops
     init_ops = list()
     for name, tensor in all_saved_tensors.iteritems():
-      if name.startswith('1b_word_level_lm'):
-        if name.startswith('1b_word_level_lm/lm/softmax/bias'):
+      if name.startswith(prefix):
+        if name.startswith('%s/lm/softmax/bias' %prefix):
           tf.logging.warning('Skipped saved tensor %s' %name)
-        elif name.startswith('1b_word_level_lm/lm/rnns'):
+        elif name.startswith('%s/lm/rnns' %prefix):
           tf.logging.warning('Skipped saved tensor %s' %name)
         elif name in all_model_vars:
           tf.logging.warning('Initialize %s from saved ckpt' %name)
@@ -188,13 +193,13 @@ def get_initializer(model):
         tf.logging.warning('%s not found in saved model' %name)
     
     # change params_init for cudnn lstm
-    wb = all_saved_tensors['1b_word_level_lm/lm/rnns_0/wb/var']
-    w_pc = py_utils.WeightParams(
-      shape=wb.shape,
-      init=py_utils.WeightInit.Constant(scale=wb),
-      dtype=tf.float32)
-    model.params.task.lm.rnns.params_init = w_pc
-    tf.logging.warning('Changing lower level cudnn lstm params_init')
+    #wb = all_saved_tensors['%s/lm/rnns_0/wb/var' %prefix]
+    #w_pc = py_utils.WeightParams(
+    #  shape=wb.shape,
+    #  init=py_utils.WeightInit.Constant(scale=wb),
+    #  dtype=tf.float32)
+    #model.params.task.lm.rnns.params_init = w_pc
+    #tf.logging.warning('Changing lower level cudnn lstm params_init')
     
     generic_init_op = tf.tables_initializer()
     init_ops.insert(0, generic_init_op)
@@ -497,6 +502,7 @@ class Trainer(base_runner.BaseRunner):
     #                                       dump_steps=[]) as pctx:
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
+      import ipdb; ipdb.set_trace()
       sess.run(self.initialize_tables)
       global_step = None
 

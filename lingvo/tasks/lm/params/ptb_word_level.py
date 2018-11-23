@@ -469,6 +469,20 @@ class PennTaggedHRRChunkLevelNF320FixedBases(PennTaggedHRRChunkLevelNF50):
     p.lm.emb.trainable_basis = False
     p.lm.trainable_basis = False
     p.train.isometric = 0.
+    p.train.word_level_ckpt_path = 'train/reb-ptb-wordhrr-sgd/train/ckpt-00062342'
+    p.train.chunk_loss_anneal = 10000000000000000000.0
+    p.lm.sent_role_anneal_steps = [1.0]
+    p.train.optimizer = optimizer.Adam.Params()
+    p.train.learning_rate = 2e-3
+    return p
+
+@model_registry.RegisterSingleTaskModel
+class PennTaggedHRRChunkLevelNF320FixedBasesFreeze(PennTaggedHRRChunkLevelNF320FixedBases):
+
+  @classmethod
+  def Task(cls):
+    p = super(PennTaggedHRRChunkLevelNF320FixedBasesFreeze, cls).Task()
+    p.lm.emb.freeze = True
     return p
 
 @model_registry.RegisterSingleTaskModel
