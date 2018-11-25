@@ -37,6 +37,7 @@ import six
 import tensorflow as tf
 
 from lingvo import base_runner
+from tensorflow.python import pywrap_tensorflow
 from tensorflow.core.protobuf import config_pb2
 from lingvo import base_trial
 from lingvo.core import base_model
@@ -156,6 +157,48 @@ def _ModelAnalysis(model):
   return output, analyzer.total
 
 
+def partial_restore(runner):
+  try:
+    partial_restore = runner._model.params.task.partial_restore
+  except:
+    partial_restore = False
+  return partial_restore and not os.path.isfile(runner._train_dir + '/restored')
+
+
+def get_tensors_in_checkpoint_file(file_name,
+                                   tensor_name,
+                                   all_tensors,
+                                   all_tensor_names=False):
+  try:
+    reader = pywrap_tensorflow.NewCheckpointReader(file_name)
+    if all_tensors or all_tensor_names:
+      var_to_shape_map = reader.get_variable_to_shape_map()
+      key_tensor_map = dict()
+      for key in sorted(var_to_shape_map):
+        # print("tensor_name: ", key)
+        if all_tensors:
+          key_tensor_map[key] = reader.get_tensor(key)
+      return key_tensor_map
+    elif not tensor_name:
+      print(reader.debug_string().decode("utf-8"))
+    else:
+      print("tensor_name: ", tensor_name)
+      return reader.get_tensor(tensor_name)
+  except Exception as e:  # pylint: disable=broad-except
+    print(str(e))
+    if "corrupted compressed block contents" in str(e):
+      print("It's likely that your checkpoint file has been compressed "
+            "with SNAPPY.")
+    if ("Data loss" in str(e) and
+        (any([e in file_name for e in [".index", ".meta", ".data"]]))):
+      proposed_file = ".".join(file_name.split(".")[0:-1])
+      v2_file_error_template = """
+It's likely that this is a V2 checkpoint and you need to provide the filename
+*prefix*.  Try removing the '.' and extension.  Try:
+inspect checkpoint --file_name = {}"""
+      print(v2_file_error_template.format(proposed_file))
+
+
 class Controller(base_runner.BaseRunner):
   """Controller for a training cluster."""
 
@@ -174,7 +217,12 @@ class Controller(base_runner.BaseRunner):
         self._model = self.params.cls(self.params)
         self._params = self._model.params
         self._model.ConstructFPropBPropGraph()
-        self._saver = self._GetSaver()
+        if partial_restore(self):
+	  black_list = ['chunk', 'global_step', 'LRSched', 'lower_softmax', 'role_pred', 'pred_proj', 'A/var', 'R/var', 'total_samples', 'total_nan', 'emb/s/var']
+	  var_list = filter(lambda t: all(map(lambda n: n not in t.name, black_list)), tf.global_variables())
+	else:
+	  var_list = None
+        self._saver = self._GetSaver(var_list=var_list)
         self._summary_op = tf.summary.merge_all()
         self._vars = tf.get_collection(tf.GraphKeys.VARIABLES)
         self._uninitialized = tf.report_uninitialized_variables(self._vars)
@@ -271,6 +319,9 @@ class Controller(base_runner.BaseRunner):
         if now < next_iteration_seconds:
           time.sleep(next_iteration_seconds - now)
 
+  def mark_partial_restore(self):
+    print('', file=open(self._train_dir + '/restored', 'w'))
+
   def _RestoreIfNeeded(self, sess):
     uninitialized_var_names = list(sess.run(self._uninitialized))
     if not uninitialized_var_names:
@@ -278,7 +329,7 @@ class Controller(base_runner.BaseRunner):
 
     tf.logging.info('Uninitialized var list: %s ', uninitialized_var_names)
     path = tf.train.latest_checkpoint(self._train_dir)
-    if path:
+    if path and not partial_restore(self):
       tf.logging.info('Load from checkpoint %s.', path)
       self._saver.restore(sess, path)
       tf.logging.info('Load checkpoint done.')
@@ -290,8 +341,39 @@ class Controller(base_runner.BaseRunner):
       tf.logging.info('Initialize ALL variables: %s', uninitialized_var_names)
       sess.run([self._initialize_all])
       tf.logging.info('Initialize variables done.')
-      return
+      if not path or not partial_restore(self):
+        return
 
+    # restore again
+    if path and partial_restore(self):
+      tf.logging.info('Partial load from checkpoint %s.', path)
+      self._saver.restore(sess, path)
+      # getting s embeddings right
+      all_saved_tensors = get_tensors_in_checkpoint_file(path, '', True)
+      prefix = self._model.params.task.name
+      emb_names = sorted(filter(lambda n: n.startswith('%s/lm/emb/s/var_' %prefix), all_saved_tensors.keys()))
+      n_shards = len(emb_names)
+      expected_n_shards = 8 if prefix.startswith('1b') else 1
+      assert n_shards == expected_n_shards
+      concat = np.concatenate([all_saved_tensors[name] for name in emb_names], axis=0)
+      chunk_tag_emb = np.random.uniform(low=-0.05, high=0.05, size=(3, 640))
+      if prefix.startswith('1b'):
+        garbage_emb = np.random.uniform(low=-0.05, high=0.05, size=(5, 640)) # garbage appended at the end to make sure it is divided by 8
+        adjusted_emb = np.concatenate([concat[:4], chunk_tag_emb, concat[4:], garbage_emb], axis=0)
+      else:
+        adjusted_emb = np.concatenate([concat[:4], chunk_tag_emb, concat[4:-3]], axis=0)
+      assert adjusted_emb.shape[0] % n_shards == 0
+      adjusted_emb_shards = np.split(adjusted_emb, n_shards, axis=0)
+      
+      for i, name in enumerate(emb_names):
+	sess.run(tf.assign(self._model.theta._task.lm.emb.s.wm[i], adjusted_emb_shards[i]))
+	tf.logging.info('Restoring s embedding shard %d' %i)
+
+      self._saver = self._GetSaver() # to save all variables
+      tf.logging.info('Partial load checkpoint done.')
+      self.mark_partial_restore()
+      return
+      
     # There was a race in local run. Another thread will get unblocked once
     # _initialize_all is called. OverrideVarsFromCheckpoints
     # might not happen at the right time.
@@ -397,14 +479,28 @@ class Trainer(base_runner.BaseRunner):
     self._RunLoop('trainer/enqueue_op/%s' % op.name, self._LoopEnqueue, op)
 
   def _Loop(self):
+    # builder = tf.profiler.ProfileOptionBuilder
+    # opts = builder(builder.time_and_memory()).order_by('micros').build()
+    # Create a profiling context, set constructor argument `trace_steps`,
+    # `dump_steps` to empty for explicit control.
+    # with tf.contrib.tfprof.ProfileContext('/tmp/train_dir',
+    #                                       trace_steps=[],
+    #                                       dump_steps=[]) as pctx:
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
       sess.run(self.initialize_tables)
       global_step = None
 
-      @py_utils.Retry(retry_value=(tf.errors.FailedPreconditionError,))
+      @py_utils.Retry(retry_value=(tf.errors.FailedPreconditionError, IOError))
       def _WaitTillInit():
         """Wait until the model is ready."""
+	if partial_restore(self):
+	  try:
+	    open(self._train_dir + '/restored', 'r')
+	  except IOError as e:
+            tf.logging.info('Waiting to be partially restored', e)
+	    raise 
+
         try:
           global_step = sess.run(self._model.global_step)
         except tf.errors.FailedPreconditionError as e:
@@ -425,6 +521,10 @@ class Trainer(base_runner.BaseRunner):
       status_interval_steps = 100
       next_status_step = 1
       eval_metrics = None
+      # 
+      # from tensorflow.python import debug as tf_debug
+      # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+
       while True:
         if (self._trial.ShouldStopAndMaybeReport(global_step, eval_metrics) or
             self._ShouldStop(sess, global_step)):
@@ -457,14 +557,15 @@ class Trainer(base_runner.BaseRunner):
             except AttributeError:
               pass
               
-        # from tensorflow.python import debug as tf_debug
-        # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+        # pctx.trace_next_step()
+        # pctx.dump_next_step()
 
         _, global_step, eval_metrics = sess.run([
             model_task.train_op,
             self._model.global_step,
             model_task.eval_metrics,
         ])
+        # pctx.profiler.profile_operations(options=opts)
         msg = 'step:%6d' % (global_step)
         for key, (val, _) in sorted(six.iteritems(eval_metrics)):
           msg += ' %s:%.8g' % (key, val)

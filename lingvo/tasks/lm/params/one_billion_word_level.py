@@ -27,12 +27,12 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
   # One Billion Words benchmark corpus is available in iq, li and ok.
   CORPUS_DIR = os.path.join('/tmp/lingvo/HRR/',
                             'data/1b/')
-  EMBEDDING_DIM = 512
+  EMBEDDING_DIM = 650
   MAX_TOKENS = 512
   NUM_EMBEDDING_SHARDS = 8
-  NUM_SAMPLED = 4096
+  NUM_SAMPLED = 8192
   NUM_SOFTMAX_SHARDS = 8
-  RNN_STATE_DIM = 512
+  RNN_STATE_DIM = 650
   VOCAB_SIZE = 218160  # includes <epsilon>, vocabulary in fst symtable format
   WORD_VOCAB = os.path.join(CORPUS_DIR, 'vocab.txt')
 
@@ -44,7 +44,7 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
     # # p.bucket_batch_limit = [256, 128, 128, 64, 64, 32, 16, 8, 4]
     # p.bucket_batch_limit = [1024, 512, 256, 256, 128, 128, 64, 32, 16]
     p.bucket_upper_bound = [10, 20, 30, 40, 50]
-    p.bucket_batch_limit = [1] * len(p.bucket_upper_bound)
+    p.bucket_batch_limit = [128] * len(p.bucket_upper_bound)
     p.file_buffer_size = 10000000
     p.file_parallelism = 10
     p.file_pattern = 'text:' + os.path.join(
@@ -99,7 +99,7 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
         num_layers=num_layers,
         residual_start=3,  # disable residuals
         rnn_dims=cls.EMBEDDING_DIM,
-        rnn_hidden_dims=cls.RNN_STATE_DIM)
+        rnn_hidden_dims=0)#cls.RNN_STATE_DIM)
 
     # Input embedding needs to be sharded.
     lm.emb.max_num_shards = cls.NUM_EMBEDDING_SHARDS
@@ -128,10 +128,10 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
   @classmethod
   def Task(cls):
     p = model.LanguageModel.Params()
-    p.name = 'ptb_word_level_lm'
+    p.name = '1b_word_level_lm'
     p.eval.samples_per_summary = 10000
 
-    p.lm = cls.get_lm_params(1, 0.75)
+    p.lm = cls.get_lm_params(2, 0.75)
     
     # Adjusts training params.
     tp = p.train
@@ -141,7 +141,7 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
     tp.clip_gradient_norm_to_value = 0.0
     tp.grad_norm_to_clip_to_zero = 0.0
     # Do clip the LSTM gradients.
-    tp.max_lstm_gradient_norm = 16
+    #tp.max_lstm_gradient_norm = 16
     # Straight Adagrad; very sensitive to initial accumulator value, the default
     # 0.1 value is far from adequate.
     # TODO(ciprianchelba): tune accumulator value, learning rate, clipping
@@ -151,7 +151,7 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
     #     lr_schedule.PiecewiseConstantLearningRateSchedule.Params().Set(
     #         boundaries=[], values=[1.0]))
     p.train.lr_schedule = (
-        lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=100))
+        lr_schedule.DevBasedSchedule.Params().Set(decay=0.9, window=1000))
         # lr_schedule.ExponentialLearningRateSchedule.Params().Set(start=(0, 1.0), limit=(10000, 0.01)))
     # tp.learning_rate = 0.02
     # p.train.optimizer = optimizer.SGD.Params()
@@ -175,12 +175,12 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
     p.lm.emb.partition_strategy = 'div'
     assert p.lm.softmax.num_classes % p.lm.softmax.num_shards == 0
 
-    p.train.optimizer = optimizer.Adam.Params()
-    p.train.learning_rate = 2e-3
+    #p.train.optimizer = optimizer.Adam.Params()
+    #p.train.learning_rate = 2e-3
 
     # HACK
     # use uniform initializer (-scale, scale)
-    scale = 0.08
+    scale = 0.05
     def iter_iter(p, pattern):
       for name, param in p.IterParams():
         if hasattr(param, 'IterParams'):
@@ -197,20 +197,22 @@ class OneBillionBaseline(base_model_params.SingleTaskModelParams):
 
     # forget gate bias set to 1.0
     for param in p.lm.rnns.cell_tpl:
-      param.forget_gate_bias = 1.0
+      # make it compatible with cudnnlstm
+      param.forget_gate_bias = 0
+      param.cell_value_cap = None
 
     # gradient norm clipping
-    p.train.clip_gradient_norm_to_value = 10.0
+    #p.train.clip_gradient_norm_to_value = 10.0
     p.train.grad_norm_to_clip_to_zero = 0.0
     p.train.max_lstm_gradient_norm = 0
 
     # Use SGD and dev-based decay learning schedule
 #     p.train.lr_schedule = (
 #         lr_schedule.DevBasedSchedule.Params().Set(decay=0.9))
-#     p.train.optimizer = optimizer.SGD.Params()
-#     p.train.learning_rate = 1.0
-#
-#     p.train.clip_gradient_norm_to_value = 5.0
+    p.train.optimizer = optimizer.SGD.Params()
+    p.train.learning_rate = 1.0
+
+    p.train.clip_gradient_norm_to_value = 5.0
 
     return p
 
@@ -237,6 +239,7 @@ class OneBillionHRRWordLevelNF50(OneBillionBaseline):
     hrr.num_roles = cls.NUM_ROLES
     hrr.num_fillers_per_role = cls.NUM_FILLERS_PER_ROLE
     hrr.s.embedding_dim = cls.NUM_FILLERS_PER_ROLE * cls.NUM_ROLES
+    hrr.lazy = True
     p.lm.emb = hrr
     p.lm.num_word_roles = cls.NUM_ROLES
     p.lm.softmax.num_roles = cls.NUM_ROLES
@@ -256,29 +259,29 @@ class OneBillionHRRWordLevelNF100(OneBillionHRRWordLevelNF50):
   NUM_FILLERS_PER_ROLE = 100
 
 @model_registry.RegisterSingleTaskModel
-class OneBillionHRRWordLevelNF250(OneBillionHRRWordLevelNF50): 
+class OneBillionHRRWordLevelNF320(OneBillionHRRWordLevelNF50): 
 
-  NUM_FILLERS_PER_ROLE = 250
+  NUM_FILLERS_PER_ROLE = 320
 
 
 @model_registry.RegisterSingleTaskModel
-class OneBillionHRRWordLevelNF250FixedBases(OneBillionHRRWordLevelNF250): 
+class OneBillionHRRWordLevelNF320FixedBases(OneBillionHRRWordLevelNF320): 
   
   @classmethod
   def Task(cls):
-    p = super(OneBillionHRRWordLevelNF250FixedBases, cls).Task()  
+    p = super(OneBillionHRRWordLevelNF320FixedBases, cls).Task()  
     p.lm.emb.trainable_basis = False
     p.train.isometric = 0.
     return p
 
 @model_registry.RegisterSingleTaskModel
-class OneBillionHRRWordLevelNR4NF125FixedBases(OneBillionHRRWordLevelNF250FixedBases):
-  NUM_FILLERS_PER_ROLE = 125
+class OneBillionHRRWordLevelNR4NF160FixedBases(OneBillionHRRWordLevelNF320FixedBases):
+  NUM_FILLERS_PER_ROLE = 160
   NUM_ROLES = 4
   
   @classmethod
   def Task(cls):
-    p = super(OneBillionHRRWordLevelNR4NF125FixedBases, cls).Task()
+    p = super(OneBillionHRRWordLevelNR4NF160FixedBases, cls).Task()
     p.lm.softmax.role_anneal_steps = [10000, 15000, 20000]
     return p
     
@@ -355,28 +358,28 @@ class OneBillionTaggedHRRChunkLevelNF50RNN(OneBillionTaggedHRRChunkLevelNF50):
     return p
 
 @model_registry.RegisterSingleTaskModel
-class OneBillionTaggedHRRChunkLevelNF250RNN(OneBillionTaggedHRRChunkLevelNF50RNN):
-  NUM_FILLERS_PER_ROLE = 250
+class OneBillionTaggedHRRChunkLevelNF320RNN(OneBillionTaggedHRRChunkLevelNF50RNN):
+  NUM_FILLERS_PER_ROLE = 320
   
 
 @model_registry.RegisterSingleTaskModel
-class OneBillionTaggedHRRChunkLevelNF250RNNFixedBases(OneBillionTaggedHRRChunkLevelNF250RNN):
+class OneBillionTaggedHRRChunkLevelNF320RNNFixedBases(OneBillionTaggedHRRChunkLevelNF320RNN):
 
   @classmethod
   def Task(cls):
-    p = super(OneBillionTaggedHRRChunkLevelNF250RNNFixedBases, cls).Task()
+    p = super(OneBillionTaggedHRRChunkLevelNF320RNNFixedBases, cls).Task()
     p.lm.emb.trainable_basis = False
     p.lm.trainable_basis = False
     p.train.isometric = 0.
     return p
 
 @model_registry.RegisterSingleTaskModel
-class OneBillionTaggedHRRChunkLevelNR4NF125RNNFixedBases(OneBillionTaggedHRRChunkLevelNF250RNNFixedBases):
-  NUM_FILLERS_PER_ROLE = 125
+class OneBillionTaggedHRRChunkLevelNR4NF160RNNFixedBases(OneBillionTaggedHRRChunkLevelNF320RNNFixedBases):
+  NUM_FILLERS_PER_ROLE = 160
   NUM_ROLES = 4
   
   @classmethod
   def Task(cls):
-    p = super(OneBillionTaggedHRRChunkLevelNR4NF125RNNFixedBases, cls).Task()
+    p = super(OneBillionTaggedHRRChunkLevelNR4NF160RNNFixedBases, cls).Task()
     p.lm.softmax.role_anneal_steps = [10000, 15000, 20000]
     return p

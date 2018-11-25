@@ -200,13 +200,13 @@ class RnnLmNoEmbedding(BaseLanguageModel):
   @classmethod
   def Params(cls):
     p = super(RnnLmNoEmbedding, cls).Params()
-    p.Define('rnns', rnn_layers.StackedFRNNLayerByLayer.Params(),
+    p.Define('rnns', rnn_layers.StackedCuDNNLSTM.Params(),
              'The stacked-RNNs layer params.')
     p.Define('softmax', layers.SimpleFullSoftmax.Params(),
              'The softmax layer params.')
     p.Define('pred_proj', layers.ProjectionLayer.Params(),
              'The projection layer params.')
-    p.Define('pred_rnn', rnn_layers.StackedFRNNLayerByLayer.Params(),
+    p.Define('pred_rnn', rnn_layers.StackedCuDNNLSTM.Params(),
              'The rnn layer for chunk prediction')
     p.Define(
         'direct_features_dim', 0,
@@ -232,8 +232,8 @@ class RnnLmNoEmbedding(BaseLanguageModel):
     cell_output_size = _RnnOutputSize(p.rnns)
     output_layer_size = cell_output_size + p.direct_features_dim
     
-    if p.use_chunks:
-        output_layer_size //= 2
+    #if p.use_chunks:
+    #    output_layer_size //= 2
     
     actual_output_size = output_layer_size * max(1, p.num_word_roles)    
     if actual_output_size != p.softmax.input_dim:
@@ -256,7 +256,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
         sp = layers.SimpleFullSoftmax.Params()
         sp.name = 'lower_softmax'
         sp.num_classes = p.num_sent_roles
-        input_dim = p.rnns.cell_tpl[-1].num_output_nodes // 2
+        input_dim = p.rnns.cell_tpl[-1].num_output_nodes #// 2
         sp.input_dim = input_dim # Note the output is split into two parts
         self.CreateChild('lower_softmax', sp)
 
@@ -293,6 +293,13 @@ class RnnLmNoEmbedding(BaseLanguageModel):
           dtype=p.dtype,
           collections=[self.__class__.__name__ + '_vars'])
         self.CreateVariable('A', A_pc)
+
+        rp_pc = py_utils.WeightParams(
+          shape=[p.rnns.cell_tpl[0].num_input_nodes, p.rnns.cell_tpl[0].num_input_nodes], # HACK
+          init=p.params_init,
+          dtype=p.dtype,
+          collections=[self.__class__.__name__ + '_vars'])
+        self.CreateVariable('role_pred', rp_pc)
 
         R_shape = [p.num_sent_roles, p.rnns.cell_tpl[0].num_input_nodes]
         R_pc = py_utils.WeightParams(
@@ -420,10 +427,23 @@ class RnnLmNoEmbedding(BaseLanguageModel):
       direct_features = py_utils.HasRank(direct_features, 3)
       activation = tf.concat([activation, direct_features], axis=2)
 
+    def mm3by2(x, y, transpose=False):
+      with tf.name_scope('mm3by2'):
+        py_utils.HasRank(x, 3)
+        py_utils.HasRank(y, 2)
+        dy = tf.shape(y)[0 if transpose else 1]
+	try:
+          bs, sl, dx = tf.unstack(tf.shape(x))
+          return tf.reshape(tf.matmul(tf.reshape(x, [bs * sl, dx]), y, transpose_b=transpose), [bs, sl, dy])
+	except:
+	  return tf.matmul(tf.reshape(x, [-1, dy]), y) # HACK
+
     # retrieve word level representations from the sentence level ones.
     if p.use_chunks > 0:
       with tf.name_scope('predict_sent_role'):
-        sent_act, activation = tf.split(activation, 2, axis=-1)
+	sent_act = mm3by2(activation, theta.role_pred)
+        #sent_act, activation = tf.split(activation, 2, axis=-1)
+        #sent_act, activation = tf.split(activation, 2, axis=-1)
         lower_logits = self.lower_softmax.Logits(theta=theta.lower_softmax, inputs=tf.reshape(sent_act, [seqlen * batch, -1]))
         lower_sent_role_probs = tf.nn.softmax(lower_logits)
         
@@ -463,7 +483,8 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             inputs=act,
             class_weights=labels.class_weights,
             class_ids=labels.class_ids,
-            activation=h)
+            activation=h,
+            emb_weights=emb_weights)
       else:
         assert 'class_probabilities' in labels
         xent_output = softmax_layer.FProp(
@@ -483,7 +504,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
 
       preceding_shape = tf.shape(activation)[:-1]
       f_noisy = self.emb.decode(tf.expand_dims(activation, axis=-2), emb_weights.r) # This is actually a bit hacky -- you don't know you have emb attribute
-      if p.decoded_filler_keep_prob > 0 and not p.is_eval:
+      if p.decoded_filler_keep_prob < 1.0 and not p.is_eval:
         f_noisy = tf.nn.dropout(f_noisy, p.decoded_filler_keep_prob)
 
       cat = tf.reshape(f_noisy, tf.concat([preceding_shape, [p.softmax.input_dim]], axis=0))
@@ -571,14 +592,6 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             inter_res.input_chunk_emb = input_chunk_emb
             inter_res.target_chunk_emb = target_chunk_emb
             
-            def mm3by2(x, y, transpose=False):
-              with tf.name_scope('mm3by2'):
-                py_utils.HasRank(x, 3)
-                py_utils.HasRank(y, 2)
-                bs, sl, dx = tf.unstack(tf.shape(x))
-                dy = tf.shape(y)[0 if transpose else 1]
-                return tf.reshape(tf.matmul(tf.reshape(x, [bs * sl, dx]), y, transpose_b=transpose), [bs, sl, dy])
-
             def get_predictions(chunk_emb):
               if p.pred_mode == 'rnn':
                 input_ = tf.transpose(chunk_emb, [1, 0, 2])
@@ -710,7 +723,7 @@ class RnnLm(RnnLmNoEmbedding):
     # Embedding.
     p.emb.vocab_size = vocab_size
     p.emb.embedding_dim = emb_dim
-    p.emb.scale_sqrt_depth = True
+    p.emb.scale_sqrt_depth = False 
     p.emb.params_init = py_utils.WeightInit.Uniform(init_scale)
 
     # RNNs
@@ -832,7 +845,7 @@ class RnnLm(RnnLmNoEmbedding):
       try:
         num_shards = len(theta.emb.wm)
       except:
-        num_shards = len(emb_weights.f)
+        num_shards = len(theta.emb.s.wm)
 
       def transpose_or_not(w):
         transpose = (p.softmax.num_sampled == 0)
@@ -845,10 +858,15 @@ class RnnLm(RnnLmNoEmbedding):
         if p.num_word_roles > 0:
           # for i in xrange(p.num_roles):
           #   softmax_theta = getattr(theta, 'softmax_%d' %i)
-          for shard_ind in xrange(num_shards):
-            f_shard = emb_weights.f[shard_ind]
-            reshaped_f_shard = tf.reshape(f_shard, [-1, p.softmax.input_dim])
-            theta.softmax['weight_%d' %shard_ind] = transpose_or_not(reshaped_f_shard)
+          if p.emb.lazy:
+            pass # NOTE lazy mode means don't share the softmax weights directly
+            # for shard_ind in xrange(num_shards):
+            #   theta.softmax['weight_%d' %shard_ind] = transpose_or_not(theta.emb.s.wm[shard_ind])
+          else:
+            for shard_ind in xrange(num_shards):
+              f_shard = emb_weights.f[shard_ind]
+              reshaped_f_shard = tf.reshape(f_shard, [-1, p.softmax.input_dim])
+              theta.softmax['weight_%d' %shard_ind] = transpose_or_not(reshaped_f_shard)
         else:
           for shard_ind in xrange(num_shards):
             theta.softmax['weight_%d' %shard_ind] = transpose_or_not(emb.e[shard_ind])
@@ -1362,6 +1380,7 @@ class HRREmbeddingLayer(base_layer.LayerBase):
     # p.Define('rs', layers.EmbeddingLayer.Params(), 'Role signature')
     p.Define('mode', 'basic', 'Modes')
     p.Define('merge', False, 'Flag to merge all collections of filler matrices into a big one')
+    p.Define('lazy', True, 'Flag to merge all collections of filler matrices into a big one')
     # TODO(jmluo)
     p.Define('vocab_size', 0, 'Vocabulary size')
     p.Define('actual_shards', -1, 'Actual number of shards used. This should not be specified, but computed during __init__ call')
@@ -1492,10 +1511,12 @@ class HRREmbeddingLayer(base_layer.LayerBase):
     p = self.params
 
     with tf.name_scope('HRR_emb_lookup'):
-      emb_weights = self._Emb2Weight(theta, role_anneal=role_anneal)
-
-
-      emb = tf.nn.embedding_lookup(emb_weights.e, ids, partition_strategy=p.s.partition_strategy)
+      if p.lazy:
+        emb_weights = self._Emb2WeightLazy(theta)
+        emb = emb_weights.func(ids).e
+      else:
+        emb_weights = self._Emb2Weight(theta, role_anneal=role_anneal)
+        emb = tf.nn.embedding_lookup(emb_weights.e, ids, partition_strategy=p.s.partition_strategy)
       s_cat = None
 
     # distribution constraint
@@ -1576,3 +1597,30 @@ class HRREmbeddingLayer(base_layer.LayerBase):
                               r=r_weights,
                               f=f_weights)
                                   
+  def _Emb2WeightLazy(self, theta):
+    '''
+    Returns a function handle instead of relevant tensors
+    '''
+    p = self.params
+    assert p.mode == 'basic'
+    
+    def _get_e_f_from_samples(samples):
+      e_weights = list()
+      rf_weights = list()
+      f_list = list()
+      all_weights = tf.concat(theta.s.wm, axis=0)
+      sampled_weights = tf.nn.embedding_lookup(theta.s.wm, samples, partition_strategy=p.s.partition_strategy)
+      sample_shape = tf.shape(samples)
+      s_weights = tf.reshape(sampled_weights, [-1, p.num_roles, p.num_fillers_per_role])
+      f_shard_list = list()
+      for role_ind in xrange(p.num_roles):
+        f_i = tf.matmul(s_weights[:, role_ind], theta.F[role_ind]) # size: V/ns x d
+        f_list.append(f_i)
+      f = tf.stack(f_list, axis=1) # size: V/n_shards x nr x d
+      rf = self._circular_conv(theta.r, f)
+      e = tf.reduce_sum(rf, axis=1)
+      e = tf.reshape(e, tf.concat([sample_shape, [p.embedding_dim]], axis=0))
+      f = tf.reshape(f, tf.concat([sample_shape, [p.num_roles, p.embedding_dim]], axis=0))
+      return py_utils.NestedMap(e=e, f=f)
+    
+    return py_utils.NestedMap(func=_get_e_f_from_samples, r=theta.r, num_shards=len(theta.s.wm), ids=tf.range(0, p.vocab_size, dtype=tf.int64))

@@ -492,6 +492,11 @@ class BaseTask(base_layer.LayerBase):
     # TODO(rpang): try to structure _train_op as:
     #   tf.cond(skip_step, <only update skip stats>, <all updates>)
     # so that we skip all other updates when a step is skipped.
+    
+    # 
+    if p.contiguous:
+        var_update_op = tf.group(var_update_op, self.last_state_group_op)
+
     self._train_op = tf.group(
         var_update_op,
         batch_norm_updates,

@@ -180,6 +180,7 @@ class StackedRNNBase(base_layer.LayerBase):
     p.Define('dropout', layers.DropoutLayer.Params(),
              'Dropout applied to each layer.')
     p.Define('packed_input', False, 'To reset states for packed inputs.')
+    p.Define('drop_last', True, 'Dropout to last layer as well')
     return p
 
   @base_layer.initializer
@@ -263,7 +264,8 @@ class StackedFRNNLayerByLayer(StackedRNNBase):
     for i in range(p.num_layers):
       ys, state1.rnn[i] = self.rnn[i].FProp(theta.rnn[i], xs, paddings,
                                             state0.rnn[i])
-      ys = self.dropout.FProp(theta.dropout, ys)
+      if i != p.num_layers - 1 or p.drop_last:
+        ys = self.dropout.FProp(theta.dropout, ys)
       if i >= p.skip_start:
         ys += xs
       xs = ys
@@ -680,7 +682,7 @@ class CuDNNLSTM(base_layer.LayerBase):
       zero_c = tf.zeros([1, batch_size, p.cell.num_output_nodes], dtype=p.dtype)
       return py_utils.NestedMap(m=zero_m, c=zero_c)
     else:
-      return self.rnn.cell.init_state(batch_size)
+      return self.rnn.cell.zero_state(batch_size)
 
   def FProp(self, theta, inputs, paddings, state0=None):
     """Compute LSTM forward pass.
@@ -727,6 +729,50 @@ class CuDNNLSTM(base_layer.LayerBase):
       output = _ReversePaddedSequence(output, paddings)
     return output, py_utils.NestedMap(m=output_h, c=output_c)
 
+
+class StackedCuDNNLSTM(StackedRNNBase):
+
+  @base_layer.initializer
+  def __init__(self, params):
+    super(StackedCuDNNLSTM, self).__init__(params)
+    p = self.params
+
+    rnn_params = []
+    with tf.name_scope(p.name):
+      for (i, cell_tpl) in enumerate(self._GetCellTpls()):
+        params = CuDNNLSTM.Params()
+        params.packed_input = p.packed_input
+        params.name = 'cudnn_lstm_%d' % i
+        params.cell = cell_tpl.Copy()
+        params.cell.cell_value_cap = None
+        params.cell.forget_gate_bias = 0
+        params.cell.name = '%s_%d' % (p.name, i)
+        rnn_params.append(params)
+    self.CreateChildren('rnn', rnn_params)
+
+    self.CreateChild('dropout', p.dropout)
+    
+  def zero_state(self, batch_size):
+    p = self.params
+    ret = py_utils.NestedMap(rnn=[])
+    for i in range(p.num_layers):
+      state0 = self.rnn[i].zero_state(batch_size)
+      ret.rnn.append(state0)
+    return ret
+      
+  def FProp(self, theta, inputs, paddings, state0=None):
+    p = self.params
+    if not state0:
+      state0 = self.zero_state(tf.shape(inputs)[1])
+    xs = inputs
+    state1 = py_utils.NestedMap(rnn=[None] * p.num_layers)
+    for i in range(p.num_layers):
+      ys, state1.rnn[i] = self.rnn[i].FProp(theta.rnn[i], xs, paddings,
+                                            state0.rnn[i])
+      if i != p.num_layers - 1 or p.drop_last:
+        ys = self.dropout.FProp(theta.dropout, ys)
+      xs = ys
+    return xs, state1
 
 class BidirectionalNativeCuDNNLSTM(base_layer.LayerBase):
   """A single layer of bidirectional LSTM with native Cudnn impl.
