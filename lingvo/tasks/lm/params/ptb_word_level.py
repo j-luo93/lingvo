@@ -322,6 +322,14 @@ class PennHRRWordLevelNF250FixedBases(PennHRRWordLevelNF250):
 class PennHRRWordLevelNF320FixedBases(PennHRRWordLevelNF250FixedBases): 
   NUM_FILLERS_PER_ROLE = 320
 
+@model_registry.RegisterSingleTaskModel
+class PennHRRWordLevelNF50FixedBases(PennHRRWordLevelNF320FixedBases): 
+  NUM_FILLERS_PER_ROLE = 50
+
+@model_registry.RegisterSingleTaskModel
+class PennHRRWordLevelNF200FixedBases(PennHRRWordLevelNF320FixedBases): 
+  NUM_FILLERS_PER_ROLE = 200
+
 '''
 Word level HRR with contiguous input, with num_fillers = 50
 '''
@@ -432,13 +440,13 @@ class PennTaggedHRRWordLevelNF50(PennHRRWordLevelNF50):
 
 
 def chunkify(p, cls):
-  p.train.chunk_loss_anneal = 3000.0
+  p.train.chunk_loss_anneal = 1.0#3000.0
   p.lm.use_chunks = True
   p.lm.num_sent_roles = 2
-  p.lm.sent_role_anneal_steps = [3000.0]
+  p.lm.sent_role_anneal_steps = [1.0]#3000.0]
   p.lm.num_word_roles = cls.NUM_ROLES
   #for tpl in p.lm.rnns.cell_tpl:
-  p.lm.rnns.cell_tpl[-1].num_output_nodes = 2 * cls.EMBEDDING_DIM
+  #p.lm.rnns.cell_tpl[-1].num_output_nodes = 2 * cls.EMBEDDING_DIM
   
   p.lm.pred_proj.input_dim = 2 * cls.EMBEDDING_DIM
   p.lm.pred_proj.output_dim = cls.EMBEDDING_DIM
@@ -469,6 +477,7 @@ class PennTaggedHRRChunkLevelNF320FixedBases(PennTaggedHRRChunkLevelNF50):
     p.lm.emb.trainable_basis = False
     p.lm.trainable_basis = False
     p.train.isometric = 0.
+    p.partial_restore = True
     return p
 
 @model_registry.RegisterSingleTaskModel

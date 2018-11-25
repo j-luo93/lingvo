@@ -60,6 +60,7 @@ class LanguageModel(base_model.BaseTask):
     tp.grad_norm_to_clip_to_zero = 100.0
     p.Define('batch_size', 20, 'Batch size')
     p.Define('contiguous', False, 'Flag')
+    p.Define('partial_restore', False, 'Flag')
     return p
 
   @base_layer.initializer
@@ -265,7 +266,7 @@ class LanguageModel(base_model.BaseTask):
     metrics = super(LanguageModel, self).FProp(theta)
     if 'isometric' in metrics:
       self._loss = self._loss + metrics['isometric'][0]
-    if 'chunk_loss' in metrics:
+    if 'chunk_loss' in metrics:# and False:
       if self.params.train.sum_loss_across_tokens_in_batch:
         self._loss = self._loss + metrics['annealed_total_chunk_loss'][0] / metrics['batch_size'][0]
       else:

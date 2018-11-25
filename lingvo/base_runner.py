@@ -135,13 +135,14 @@ class BaseRunner(object):
                   tag=filename, tensor=tf.make_tensor_proto([text]))
           ]))
 
-  def _GetSaver(self):
+  def _GetSaver(self, var_list=None):
     """Returns a saver."""
     assert tf.get_default_graph() == self._graph
     if self.params.is_eval and self._model.ema:
       tf.logging.info('Using EMA for evaluation.')
       return tf.train.Saver(self._model.ema.variables_to_restore())
     return tf.train.Saver(
+	var_list=var_list,
         sharded=True,
         max_to_keep=FLAGS.saver_max_to_keep,
         keep_checkpoint_every_n_hours=0.5,  # one per 30 minutes

@@ -232,8 +232,8 @@ class RnnLmNoEmbedding(BaseLanguageModel):
     cell_output_size = _RnnOutputSize(p.rnns)
     output_layer_size = cell_output_size + p.direct_features_dim
     
-    if p.use_chunks:
-        output_layer_size //= 2
+    #if p.use_chunks:
+    #    output_layer_size //= 2
     
     actual_output_size = output_layer_size * max(1, p.num_word_roles)    
     if actual_output_size != p.softmax.input_dim:
@@ -256,7 +256,7 @@ class RnnLmNoEmbedding(BaseLanguageModel):
         sp = layers.SimpleFullSoftmax.Params()
         sp.name = 'lower_softmax'
         sp.num_classes = p.num_sent_roles
-        input_dim = p.rnns.cell_tpl[-1].num_output_nodes // 2
+        input_dim = p.rnns.cell_tpl[-1].num_output_nodes #// 2
         sp.input_dim = input_dim # Note the output is split into two parts
         self.CreateChild('lower_softmax', sp)
 
@@ -293,6 +293,13 @@ class RnnLmNoEmbedding(BaseLanguageModel):
           dtype=p.dtype,
           collections=[self.__class__.__name__ + '_vars'])
         self.CreateVariable('A', A_pc)
+
+        rp_pc = py_utils.WeightParams(
+          shape=[p.rnns.cell_tpl[0].num_input_nodes, p.rnns.cell_tpl[0].num_input_nodes], # HACK
+          init=p.params_init,
+          dtype=p.dtype,
+          collections=[self.__class__.__name__ + '_vars'])
+        self.CreateVariable('role_pred', rp_pc)
 
         R_shape = [p.num_sent_roles, p.rnns.cell_tpl[0].num_input_nodes]
         R_pc = py_utils.WeightParams(
@@ -420,10 +427,23 @@ class RnnLmNoEmbedding(BaseLanguageModel):
       direct_features = py_utils.HasRank(direct_features, 3)
       activation = tf.concat([activation, direct_features], axis=2)
 
+    def mm3by2(x, y, transpose=False):
+      with tf.name_scope('mm3by2'):
+        py_utils.HasRank(x, 3)
+        py_utils.HasRank(y, 2)
+        dy = tf.shape(y)[0 if transpose else 1]
+	try:
+          bs, sl, dx = tf.unstack(tf.shape(x))
+          return tf.reshape(tf.matmul(tf.reshape(x, [bs * sl, dx]), y, transpose_b=transpose), [bs, sl, dy])
+	except:
+	  return tf.matmul(tf.reshape(x, [-1, dy]), y) # HACK
+
     # retrieve word level representations from the sentence level ones.
     if p.use_chunks > 0:
       with tf.name_scope('predict_sent_role'):
-        sent_act, activation = tf.split(activation, 2, axis=-1)
+	sent_act = mm3by2(activation, theta.role_pred)
+        #sent_act, activation = tf.split(activation, 2, axis=-1)
+        #sent_act, activation = tf.split(activation, 2, axis=-1)
         lower_logits = self.lower_softmax.Logits(theta=theta.lower_softmax, inputs=tf.reshape(sent_act, [seqlen * batch, -1]))
         lower_sent_role_probs = tf.nn.softmax(lower_logits)
         
@@ -572,14 +592,6 @@ class RnnLmNoEmbedding(BaseLanguageModel):
             inter_res.input_chunk_emb = input_chunk_emb
             inter_res.target_chunk_emb = target_chunk_emb
             
-            def mm3by2(x, y, transpose=False):
-              with tf.name_scope('mm3by2'):
-                py_utils.HasRank(x, 3)
-                py_utils.HasRank(y, 2)
-                bs, sl, dx = tf.unstack(tf.shape(x))
-                dy = tf.shape(y)[0 if transpose else 1]
-                return tf.reshape(tf.matmul(tf.reshape(x, [bs * sl, dx]), y, transpose_b=transpose), [bs, sl, dy])
-
             def get_predictions(chunk_emb):
               if p.pred_mode == 'rnn':
                 input_ = tf.transpose(chunk_emb, [1, 0, 2])
