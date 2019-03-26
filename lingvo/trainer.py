@@ -624,7 +624,7 @@ class Evaler(base_runner.BaseRunner):
       while True:
         path = self._FindNewCheckpoint(path, sess)
         # CE-HACK
-        path = '/tmp/lingvo/train/NT-mn10.0/train/ckpt-00009814'
+        path = '/tmp/lingvo/train/reb-ptb-chunk-sgd/train/ckpt-00032586'
         if not path or self._EvalOnce(path, sess):
           break
 
@@ -638,7 +638,8 @@ class Evaler(base_runner.BaseRunner):
       sess.run(self.initialize_tables)
       path = tf.train.latest_checkpoint(self._train_dir)
       # CE-HACK
-      path = '/tmp/lingvo/train/NT-mn10.0/ckpt-00009814'
+      #path = '/tmp/lingvo/train/NT-mn10.0/ckpt-00009814'
+      path = '/tmp/lingvo/train/reb-ptb-chunk-sgd/train/ckpt-00032586'
       if not path:
         tf.logging.info('No checkpoint available.')
         return

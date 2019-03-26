@@ -80,6 +80,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     # Use small batches for eval.
     p.bucket_upper_bound = [10, 20, 30, 40, 50, 100, 256, 512, 1024]
     p.bucket_batch_limit = [128, 64, 32, 32, 16, 16, 4, 2, 1]
+    p.bucket_batch_limit = [5 * k for k in [128, 64, 32, 32, 16, 16, 4, 2, 1]]
     p.file_buffer_size = 1
     p.file_parallelism = 1
     p.file_pattern = 'text:' + os.path.join(
@@ -87,7 +88,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
     p.name = 'ptb_dev_set'
     p.num_batcher_threads = 1
     # CE-HACK
-    p.num_samples = 2322#3370  # Number of sentences to evaluate on.
+    p.num_samples = 28703 #2322#3370  # Number of sentences to evaluate on.
     return p
 
   @classmethod
@@ -143,7 +144,7 @@ class PennBaseline(base_model_params.SingleTaskModelParams):
   def Task(cls):
     p = model.LanguageModel.Params()
     p.name = 'ptb_word_level_lm'
-    p.eval.samples_per_summary = 10000
+    p.eval.samples_per_summary = 100000
 
     p.lm = cls.get_lm_params(2, 0.5)
     
